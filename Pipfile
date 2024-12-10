@@ -58,7 +58,7 @@ langchainhub = ">=0.1.21"
 furl = ">=2.1.3"
 # tiktoken is a fast BPE tokeniser for use with OpenAI's models
 # tiktoken 0.8.0 is missing wheel for tiktoken-0.7.0-cp312-cp312-musllinux_1_2_aarch64.whl: https://pypi.org/simple/tiktoken/
-tiktoken = "==0.7.0"
+tiktoken = "==0.8.0"
 # duckduckgo-search is a Python library for searching DuckDuckGo web results
 duckduckgo-search = ">=6.3.7"
 # xmltodict is a Python library for working with XML.  It is used by the PubMed tool
