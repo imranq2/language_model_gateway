@@ -47,7 +47,7 @@ langchain-openai = ">=0.2.12"
 # langchain-community is a Python library that contains ommmunity extensions
 langchain-community = ">=0.3.12"
 # grpcio is a Python library for working with gRPC.   Needed by Google Vertex AI
-grpcio = { version = "==1.66.0", index = "alpine-wheels" }
+grpcio = { version = "==1.68.1", index = "alpine-wheels" }
 # langchain-google-community is a Python library that contains Google community extensions
 langchain-google-community = ">=2.0.3"
 # langgraph is a Python library for building language models
