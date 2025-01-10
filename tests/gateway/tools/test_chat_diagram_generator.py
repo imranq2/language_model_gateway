@@ -8,7 +8,7 @@ from openai.types.chat.chat_completion import Choice
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
@@ -60,7 +60,7 @@ async def test_chat_diagram_generator(async_client: httpx.AsyncClient) -> None:
                     model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
                 ),
                 tools=[
-                    ToolConfig(name="graph_viz_diagram_generator"),
+                    AgentConfig(name="graph_viz_diagram_generator"),
                 ],
             )
         ]

@@ -200,7 +200,7 @@ class ProviderSearchTool(BaseTool):
             response = await async_client.post(self.api_url, json=payload, timeout=30.0)
             return (
                 self._handle_response(response),
-                f"ProviderSearchTool: Searched for {search} {variables} ",
+                f"ProviderSearchAgent: Searched for {search} {variables} ",
             )
 
         except httpx.TimeoutException:

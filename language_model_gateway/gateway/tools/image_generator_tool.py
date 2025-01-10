@@ -89,14 +89,14 @@ class ImageGeneratorTool(BaseTool):
             if file_path is None:
                 return (
                     "Failed to save image to disk",
-                    f"ImageGeneratorTool[{self.model_provider}]: Failed to save image to disk from prompt: {prompt}",
+                    f"ImageGeneratorAgent[{self.model_provider}]: Failed to save image to disk from prompt: {prompt}",
                 )
 
             url: Optional[str] = UrlParser.get_url_for_file_name(image_file_name)
             if url is None:
                 return (
                     "Failed to save image to disk",
-                    f"ImageGeneratorTool[{self.model_provider}]: Failed to save image to disk from prompt: {prompt}",
+                    f"ImageGeneratorAgent[{self.model_provider}]: Failed to save image to disk from prompt: {prompt}",
                 )
 
             if self.return_embedded_image:
@@ -105,17 +105,17 @@ class ImageGeneratorTool(BaseTool):
                 markdown_image = f"![Generated Image]({embedded_url})"
                 return (
                     url,
-                    f"ImageGeneratorTool[{self.model_provider}]: Generated image from prompt: {prompt}: {markdown_image} ",
+                    f"ImageGeneratorAgent[{self.model_provider}]: Generated image from prompt: {prompt}: {markdown_image} ",
                 )
             else:
                 return (
                     url,
-                    f"ImageGeneratorTool[{self.model_provider}]: Generated image from prompt: {prompt}: <{url}> ",
+                    f"ImageGeneratorAgent[{self.model_provider}]: Generated image from prompt: {prompt}: <{url}> ",
                 )
         except Exception as e:
             logger.error(f"Failed to generate image: {str(e)}")
             logger.exception(e, stack_info=True)
             return (
                 f"Failed to generate image: {e}",
-                f"ImageGeneratorTool[{self.model_provider}]: Failed to generate image from prompt: {prompt}",
+                f"ImageGeneratorAgent[{self.model_provider}]: Failed to generate image from prompt: {prompt}",
             )

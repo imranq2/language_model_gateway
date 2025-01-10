@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class GraphVizDiagramGeneratorToolInput(BaseModel):
-    dot_input: str = Field(
+    dotInput: str = Field(
         description="a string describing the nodes and edges in DOT format. "
         "For example:\n"
         "digraph G {\n"
@@ -49,18 +49,18 @@ class GraphVizDiagramGeneratorTool(BaseTool):
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
     file_manager_factory: FileManagerFactory
 
-    def _run(self, dot_input: str) -> Tuple[str, str]:
+    def _run(self, dotInput: str) -> Tuple[str, str]:
         """
         Run the tool to generate a diagram from DOT input.
-        :param dot_input: The DOT description of the graph.
+        :param dotInput: The DOT description of the graph.
         :return: The path to the generated diagram.
         """
         raise NotImplementedError("Call the asynchronous version of the tool")
 
-    async def _arun(self, dot_input: str) -> Tuple[str, str]:
+    async def _arun(self, dotInput: str) -> Tuple[str, str]:
         """
         Asynchronous version of the tool.
-        :param dot_input: The DOT description of the graph.
+        :param dotInput: The DOT description of the graph.
         :return: The path to the generated diagram.
         """
         # For simplicity, call the synchronous version
@@ -68,7 +68,7 @@ class GraphVizDiagramGeneratorTool(BaseTool):
             # Create a Graphviz object
             dot = Digraph(format="png")
             # Parse the DOT input
-            for line in dot_input.strip().split("\n"):
+            for line in dotInput.strip().split("\n"):
                 if "->" in line or "--" in line:
                     # Add edges
                     edge = line.replace(";", "").strip()
@@ -107,14 +107,14 @@ class GraphVizDiagramGeneratorTool(BaseTool):
             if file_path is None:
                 return (
                     "Failed to save image to disk",
-                    f"GraphVizDiagramGeneratorTool: Failed to save image to disk from prompt: {dot_input}",
+                    f"GraphVizDiagramGeneratorTool: Failed to save image to disk from prompt: {dotInput}",
                 )
 
             url: Optional[str] = UrlParser.get_url_for_file_name(image_file_name)
             if url is None:
                 return (
                     "Failed to save image to disk",
-                    f"GraphVizDiagramGeneratorTool: Failed to save image to disk from prompt: {dot_input}",
+                    f"GraphVizDiagramGeneratorTool: Failed to save image to disk from prompt: {dotInput}",
                 )
 
             artifact: str = f"GraphVizDiagramGeneratorTool: Generated image: <{url}> "

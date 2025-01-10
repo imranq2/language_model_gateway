@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/imranq2/language_model_gateway/main/language_model_gateway/configs/config_schema.json",
+  "id": "github",
+  "name": "Github Analyzer",
+  "description": "This model allows searching pull requests across repos and getting git diff.",
+  "owner": "Imran Qureshi",
+  "system_prompts": [
+    {
+      "role": "system",
+      "content": "You are an agent that can search pull requests across repos and get git diff."
+    }
+  ],
+  "example_prompts": [
+    {
+      "role": "user",
+      "content": "start"
+    }
+  ],
+  "tools": [
+    {
+      "name": "current_date"
+    },
+    {
+      "name": "github_pull_request_analyzer"
+    },
+    {
+      "name": "github_pull_request_diff"
+    }
+  ]
+}

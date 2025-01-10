@@ -7,7 +7,7 @@ from openai.types.chat import ChatCompletion
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
     PromptConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
@@ -57,9 +57,9 @@ async def test_chat_anthropic_with_web_scraping(
                     )
                 ],
                 tools=[
-                    ToolConfig(name="google_search"),
-                    ToolConfig(name="get_web_page"),
-                    ToolConfig(name="scraping_bee_web_scraper"),
+                    AgentConfig(name="google_search"),
+                    AgentConfig(name="get_web_page"),
+                    AgentConfig(name="scraping_bee_web_scraper"),
                 ],
             )
         ]

@@ -9,7 +9,7 @@ from pytest_httpx import HTTPXMock
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
     PromptConfig,
     ModelParameterConfig,
 )
@@ -75,8 +75,8 @@ async def test_chat_completions_b_well(
                 ],
                 model_parameters=[ModelParameterConfig(key="temperature", value=0)],
                 tools=[
-                    ToolConfig(name="current_date"),
-                    ToolConfig(name="get_web_page"),
+                    AgentConfig(name="current_date"),
+                    AgentConfig(name="get_web_page"),
                 ],
             )
         ]

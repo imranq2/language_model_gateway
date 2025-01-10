@@ -49,7 +49,7 @@ class HeaderConfig(BaseModel):
     """The value of the header"""
 
 
-class ToolParameterConfig(BaseModel):
+class AgentParameterConfig(BaseModel):
     """Tool parameter configuration"""
 
     key: str
@@ -59,13 +59,13 @@ class ToolParameterConfig(BaseModel):
     """The value of the parameter"""
 
 
-class ToolConfig(BaseModel):
+class AgentConfig(BaseModel):
     """Tool configuration"""
 
     name: str
     """The name of the tool"""
 
-    parameters: List[ToolParameterConfig] | None = None
+    parameters: List[AgentParameterConfig] | None = None
     """The parameters for the tool"""
 
 
@@ -114,8 +114,15 @@ class ChatModelConfig(BaseModel):
     headers: List[HeaderConfig] | None = None
     """The headers to pass to url when calling the model"""
 
-    tools: List[ToolConfig] | None = None
+    tools: List[AgentConfig] | None = None
+    """The tools to use with the model"""
+
+    agents: List[AgentConfig] | None = None
     """The tools to use with the model"""
 
     example_prompts: List[PromptConfig] | None = None
     """Example prompts for the model"""
+
+    def get_agents(self) -> List[AgentConfig]:
+        """Get the agents for the model"""
+        return self.agents or self.tools or []

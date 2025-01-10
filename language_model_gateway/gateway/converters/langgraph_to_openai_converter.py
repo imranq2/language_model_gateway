@@ -136,7 +136,10 @@ class LangGraphToOpenAIConverter:
                                 content_text, str
                             ), f"content_text: {content_text} (type: {type(content_text)})"
 
-                            if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                            if (
+                                os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1"
+                                and content_text
+                            ):
                                 logger.info(f"Returning content: {content_text}")
 
                             if content_text:
@@ -187,6 +190,13 @@ class LangGraphToOpenAIConverter:
                                 )
                             )
                             yield f"data: {json.dumps(chat_end_stream_response.model_dump())}\n\n"
+                    case "on_tool_start":
+                        # Handle the start of the tool event
+                        tool_name: Optional[str] = event.get("name", None)
+                        tool_input: Dict[str, Any] | None = event.get("data", {}).get(
+                            "input"
+                        )
+                        logger.debug(f"on_tool_start: {tool_name} {tool_input}")
                     case "on_tool_end":
                         # Handle the end of the tool event
                         tool_message: ToolMessage | None = event.get("data", {}).get(
@@ -339,7 +349,7 @@ class LangGraphToOpenAIConverter:
                         for i in range(1)
                     ]
 
-                if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1" and choices_text:
                     logger.info(f"Returning content: {choices_text}")
 
                 chat_response: ChatCompletion = ChatCompletion(

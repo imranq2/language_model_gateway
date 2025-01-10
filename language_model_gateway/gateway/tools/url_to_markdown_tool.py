@@ -69,9 +69,9 @@ class URLToMarkdownTool(BaseTool):
                 logger.info(
                     f"====== Scraped {url} ======\n{content}\n====== End of Scraped Markdown ======"
                 )
-            return content, f"URLToMarkdownTool: Scraped content from <{url}> "
+            return content, f"URLToMarkdownAgent: Scraped content from <{url}> "
         except Exception as e:
             return (
                 f"Failed to fetch or process the URL {url}: {str(e)}",
-                f"URLToMarkdownTool: Failed to fetch or process the URL: <{url}> ",
+                f"URLToMarkdownAgent: Failed to fetch or process the URL: <{url}> ",
             )

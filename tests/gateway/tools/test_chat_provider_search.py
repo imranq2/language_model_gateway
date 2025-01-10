@@ -8,7 +8,7 @@ from openai.types.chat.chat_completion import Choice
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
@@ -60,7 +60,7 @@ async def test_chat_provider_search(async_client: httpx.AsyncClient) -> None:
                     model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
                 ),
                 tools=[
-                    ToolConfig(name="provider_search"),
+                    AgentConfig(name="provider_search"),
                 ],
             )
         ]
@@ -140,7 +140,7 @@ async def test_chat_provider_search_streaming(
                     model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
                 ),
                 tools=[
-                    ToolConfig(name="provider_search"),
+                    AgentConfig(name="provider_search"),
                 ],
             )
         ]

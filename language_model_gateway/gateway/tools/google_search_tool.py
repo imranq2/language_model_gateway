@@ -137,7 +137,7 @@ class GoogleSearchTool(BaseTool):
             if len(results) == 0:
                 return (
                     "No good Google Search Result was found",
-                    f'GoogleSearchTool: Searched Google for "{query}"',
+                    f'GoogleSearchAgent: Searched Google for "{query}"',
                 )
 
             for result in results:
@@ -147,12 +147,12 @@ class GoogleSearchTool(BaseTool):
             response: str = "\n".join(snippets)
             if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
                 logger.info(f"Google Search results: {response}")
-            return response, f'GoogleSearchTool: Searched Google for "{query}"'
+            return response, f'GoogleSearchAgent: Searched Google for "{query}"'
         except Exception as e:
             logger.exception(e, stack_info=True)
             return (
                 "Ran into an error while running Google Search",
-                f'GoogleSearchTool: Searched Google for "{query}"',
+                f'GoogleSearchAgent: Searched Google for "{query}"',
             )
 
     # noinspection PyPep8Naming,PyShadowingBuiltins

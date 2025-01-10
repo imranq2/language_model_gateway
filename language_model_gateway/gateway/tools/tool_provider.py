@@ -7,7 +7,7 @@ from langchain_community.tools import (
 )
 from langchain_core.tools import BaseTool
 
-from language_model_gateway.configs.config_schema import ToolConfig
+from language_model_gateway.configs.config_schema import AgentConfig
 from language_model_gateway.gateway.file_managers.file_manager_factory import (
     FileManagerFactory,
 )
@@ -23,6 +23,12 @@ from language_model_gateway.gateway.tools.er_diagram_generator_tool import (
 )
 from language_model_gateway.gateway.tools.flow_chart_generator_tool import (
     FlowChartGeneratorTool,
+)
+from language_model_gateway.gateway.tools.github_pull_request_analyzer_tool import (
+    GitHubPullRequestAnalyzerTool,
+)
+from language_model_gateway.gateway.tools.github_pull_request_diff_tool import (
+    GitHubPullRequestDiffTool,
 )
 from language_model_gateway.gateway.tools.google_search_tool import GoogleSearchTool
 from language_model_gateway.gateway.tools.graph_viz_diagram_generator_tool import (
@@ -107,6 +113,12 @@ class ToolProvider:
             "pdf_text_extractor": PDFExtractionTool(
                 ocr_extractor_factory=ocr_extractor_factory
             ),
+            "github_pull_request_analyzer": GitHubPullRequestAnalyzerTool(
+                access_token=environ.get("GITHUB_TOKEN")
+            ),
+            "github_pull_request_diff": GitHubPullRequestDiffTool(
+                access_token=environ.get("GITHUB_TOKEN")
+            ),
             # "sql_query": QuerySQLDataBaseTool(
             #     db=SQLDatabase(
             #         engine=Engine(
@@ -118,10 +130,10 @@ class ToolProvider:
             # ),
         }
 
-    def get_tool_by_name(self, *, tool: ToolConfig) -> BaseTool:
+    def get_tool_by_name(self, *, tool: AgentConfig) -> BaseTool:
         if tool.name in self.tools:
             return self.tools[tool.name]
         raise ValueError(f"Tool with name {tool.name} not found")
 
-    def get_tools(self, *, tools: list[ToolConfig]) -> list[BaseTool]:
+    def get_tools(self, *, tools: list[AgentConfig]) -> list[BaseTool]:
         return [self.get_tool_by_name(tool=tool) for tool in tools]

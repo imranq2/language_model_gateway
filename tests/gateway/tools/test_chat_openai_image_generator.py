@@ -8,7 +8,7 @@ from openai.types.chat.chat_completion import Choice
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
@@ -60,7 +60,7 @@ async def test_chat_openai_image_generator(async_client: httpx.AsyncClient) -> N
                     model="gpt-4o",
                 ),
                 tools=[
-                    ToolConfig(name="image_generator_openai"),
+                    AgentConfig(name="image_generator_openai"),
                 ],
             )
         ]
@@ -138,7 +138,7 @@ async def test_chat_anthropic_image_generator_streaming(
                     model="gpt-4o",
                 ),
                 tools=[
-                    ToolConfig(name="image_generator_openai"),
+                    AgentConfig(name="image_generator_openai"),
                 ],
             )
         ]

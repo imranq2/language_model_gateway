@@ -210,7 +210,10 @@
                   "er_diagram_generator",
                   "network_topology_generator",
                   "scraping_bee_web_scraper",
-                  "provider_search"
+                  "provider_search",
+                  "pdf_text_extractor ",
+                  "github_pull_request_analyzer",
+                  "github_pull_request_diff"
                 ]
               },
               {
@@ -221,6 +224,69 @@
           "parameters": {
             "type": "array",
             "description": "Parameters for the tool.",
+            "items": {
+              "type": "object",
+              "required": [
+                "key",
+                "value"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "description": "Parameter name."
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Parameter value."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "description": "These are the agents that are available for the model.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the agent.",
+            "oneOf": [
+              {
+                "enum": [
+                  "current_date",
+                  "pubmed",
+                  "web_search",
+                  "get_web_page",
+                  "arxiv_search",
+                  "image_generator",
+                  "image_generator_openai",
+                  "graph_viz_diagram_generator",
+                  "sequence_diagram_generator",
+                  "flow_chart_generator",
+                  "er_diagram_generator",
+                  "network_topology_generator",
+                  "scraping_bee_web_scraper",
+                  "provider_search",
+                  "pdf_text_extractor ",
+                  "github_pull_request_analyzer",
+                  "github_pull_request_diff"
+                ]
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "parameters": {
+            "type": "array",
+            "description": "Parameters for the agent.",
             "items": {
               "type": "object",
               "required": [

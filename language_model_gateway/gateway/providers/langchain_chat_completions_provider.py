@@ -62,8 +62,8 @@ class LangChainCompletionsProvider(BaseChatCompletionsProvider):
 
         # Initialize tools
         tools: Sequence[BaseTool] = (
-            self.tool_provider.get_tools(tools=[t for t in model_config.tools])
-            if model_config.tools is not None
+            self.tool_provider.get_tools(tools=[t for t in model_config.get_agents()])
+            if model_config.get_agents() is not None
             else []
         )
 

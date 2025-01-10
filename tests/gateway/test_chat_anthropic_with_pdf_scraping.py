@@ -7,7 +7,7 @@ from openai.types.chat import ChatCompletion
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
     PromptConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
@@ -57,9 +57,9 @@ async def test_chat_anthropic_with_pdf_scraping(
                     )
                 ],
                 tools=[
-                    ToolConfig(name="google_search"),
-                    ToolConfig(name="get_web_page"),
-                    ToolConfig(name="pdf_text_extractor"),
+                    AgentConfig(name="google_search"),
+                    AgentConfig(name="get_web_page"),
+                    AgentConfig(name="pdf_text_extractor"),
                 ],
             )
         ]
@@ -129,9 +129,9 @@ async def test_chat_anthropic_with_pdf_ocr_scraping(
                     )
                 ],
                 tools=[
-                    ToolConfig(name="google_search"),
-                    ToolConfig(name="get_web_page"),
-                    ToolConfig(name="pdf_text_extractor"),
+                    AgentConfig(name="google_search"),
+                    AgentConfig(name="get_web_page"),
+                    AgentConfig(name="pdf_text_extractor"),
                 ],
             )
         ]

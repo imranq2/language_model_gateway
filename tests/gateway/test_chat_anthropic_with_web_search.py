@@ -8,7 +8,7 @@ from openai.types.chat import ChatCompletion
 from language_model_gateway.configs.config_schema import (
     ChatModelConfig,
     ModelConfig,
-    ToolConfig,
+    AgentConfig,
 )
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
@@ -53,8 +53,8 @@ async def test_chat_completions_with_web_search(
                     model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
                 ),
                 tools=[
-                    ToolConfig(name="google_search"),
-                    ToolConfig(name="get_web_page"),
+                    AgentConfig(name="google_search"),
+                    AgentConfig(name="get_web_page"),
                 ],
             )
         ]
