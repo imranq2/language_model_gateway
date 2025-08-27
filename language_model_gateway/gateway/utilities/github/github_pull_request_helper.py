@@ -1,13 +1,14 @@
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 from logging import Logger
-from typing import Dict, Optional, List, Union, Any
+from typing import Dict, Optional, List, Union, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
-from httpx import Response
+from httpx import Response, URL
 
 from language_model_gateway.gateway.http.http_client_factory import HttpClientFactory
 from language_model_gateway.gateway.utilities.github.github_pull_request import (
@@ -15,6 +16,9 @@ from language_model_gateway.gateway.utilities.github.github_pull_request import 
 )
 from language_model_gateway.gateway.utilities.github.github_pull_request_per_contributor_info import (
     GithubPullRequestPerContributorInfo,
+)
+from language_model_gateway.gateway.utilities.github.github_pull_request_result import (
+    GithubPullRequestResult,
 )
 
 
@@ -91,7 +95,12 @@ class GithubPullRequestHelper:
         max_created_at: Optional[datetime] = None,
         include_merged: bool = True,
         repo_name: Optional[str] = None,
-    ) -> List[GithubPullRequest]:
+        sort_by: Optional[
+            Literal["created", "updated", "popularity", "long-running"]
+        ] = None,
+        sort_by_direction: Optional[Literal["asc", "desc"]] = None,
+        status: Optional[Literal["closed"]] = None,
+    ) -> GithubPullRequestResult:
         """
         Async method to retrieve closed pull requests across organization repositories.
         """
@@ -99,12 +108,25 @@ class GithubPullRequestHelper:
         assert self.org_name, "Organization name is required"
         assert self.github_access_token, "GitHub access token is required"
 
+        if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+            self.logger.info(
+                f"Retrieving closed PRs for {self.org_name} organization"
+                f" with max_repos={max_repos}, max_pull_requests={max_pull_requests},"
+                f" min_created_at={min_created_at}, max_created_at={max_created_at},"
+                f" include_merged={include_merged}, repo_name={repo_name},"
+                f" sort_by={sort_by}, sort_by_direction={sort_by_direction},"
+                f" status={status}"
+            )
+
         async with self.http_client_factory.create_http_client(
             base_url=self.base_url, headers=self.headers, timeout=30.0
         ) as client:
+            query: str = ""
             try:
                 if repo_name:
                     repos_url = f"{self.base_url}/repos/{self.org_name}/{repo_name}"
+                    if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                        self.logger.info(f"Fetching repository: {repos_url}")
                     repo_response = await client.get(
                         repos_url,
                         headers={
@@ -112,6 +134,10 @@ class GithubPullRequestHelper:
                             **self.headers,
                         },
                     )
+
+                    if not query:
+                        url: URL = repo_response.request.url
+                        query += f"\n{str(url)}"
                     repo_response.raise_for_status()
                     repos = [repo_response.json()]
                 else:
@@ -122,26 +148,35 @@ class GithubPullRequestHelper:
 
                     page_number: int = 1
                     while pages_remaining:
+                        params: Dict[str, Any] = {
+                            "type": "all",
+                            "sort": "pushed",
+                            "direction": "desc",
+                            "per_page": max_repos or 50,
+                            "page": page_number,
+                        }
+                        if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                            self.logger.info(
+                                f"Fetching repositories: {repos_url}: {params}"
+                            )
                         repos_response = await client.get(
                             repos_url,
                             headers={
                                 "Accept": "application/vnd.github+json",
                                 **self.headers,
                             },
-                            params={
-                                "type": "all",
-                                "sort": "pushed",
-                                "direction": "desc",
-                                "per_page": max_repos or 50,
-                                "page": page_number,
-                            },
+                            params=params,
                         )
+                        url = repos_response.request.url
+                        query += f"\n{str(url)}"
+
                         repos_response.raise_for_status()
                         repos.extend(repos_response.json())
                         if max_repos and len(repos) >= max_repos:
                             pages_remaining = False
                         elif len(repos_response.json()) == 0:
                             pages_remaining = False
+                        page_number += 1
 
                 # Limit repositories if max_repos is specified
                 repos = repos[:max_repos] if max_repos else repos
@@ -153,18 +188,50 @@ class GithubPullRequestHelper:
                     prs_url = (
                         f"{self.base_url}/repos/{self.org_name}/{repo['name']}/pulls"
                     )
-                    prs_response = await client.get(
-                        prs_url,
-                        params={
-                            "state": "closed",
-                            "sort": "created",
-                            "direction": "desc",
-                        },
-                    )
-                    prs_response.raise_for_status()
-                    prs: List[Dict[str, Any]] = prs_response.json()
+                    pages_remaining = True
+                    prs: List[Dict[str, Any]] = []
+                    page_number = 1
+
+                    while pages_remaining:
+                        params = {
+                            "state": status or "closed",
+                            "sort": sort_by or "created",
+                            "direction": sort_by_direction or "desc",
+                            "per_page": max_pull_requests or 50,
+                            "page": page_number,
+                        }
+                        if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                            self.logger.info(f"Fetching PRs: {prs_url}: {params}")
+
+                        prs_response = await client.get(
+                            prs_url,
+                            params=params,
+                        )
+                        query += f"\n{str(prs_response.request.url)}"
+                        prs_response.raise_for_status()
+                        prs.extend(prs_response.json())
+                        if len(prs_response.json()) == 0:
+                            pages_remaining = False
+                        else:
+                            if max_pull_requests and len(prs) >= max_pull_requests:
+                                pages_remaining = False
+
+                            if max_created_at:
+                                pr_created_at = datetime.fromisoformat(
+                                    prs[-1]["created_at"].replace("Z", "+00:00")
+                                )
+                                if pr_created_at <= max_created_at:
+                                    pages_remaining = False
+                            if min_created_at:
+                                pr_created_at = datetime.fromisoformat(
+                                    prs[-1]["created_at"].replace("Z", "+00:00")
+                                )
+                                if pr_created_at < min_created_at:
+                                    pages_remaining = False
+                        page_number += 1
 
                     for pr_index, pr in enumerate(prs):
+                        self.logger.info(f"PR DETAILS:\n{pr}")
                         if max_pull_requests and pr_index >= max_pull_requests:
                             break
 
@@ -178,11 +245,19 @@ class GithubPullRequestHelper:
                         if not max_created_at or pr_created_at <= max_created_at:
                             if (include_merged and pr.get("'merge_commit_sha'")) or pr[
                                 "state"
-                            ] == "closed":
+                            ] == (status or "closed"):
                                 closed_prs_list.append(
                                     GithubPullRequest(
+                                        pull_request_number=pr["number"],
                                         repo=repo["name"],
                                         title=pr.get("title") or "No Title",
+                                        created_at=(
+                                            datetime.fromisoformat(
+                                                pr["created_at"].replace("Z", "+00:00")
+                                            )
+                                            if pr.get("created_at")
+                                            else None
+                                        ),
                                         closed_at=(
                                             datetime.fromisoformat(
                                                 pr["closed_at"].replace("Z", "+00:00")
@@ -190,18 +265,55 @@ class GithubPullRequestHelper:
                                             if pr.get("closed_at")
                                             else None
                                         ),
+                                        updated_at=(
+                                            datetime.fromisoformat(
+                                                pr["updated_at"].replace("Z", "+00:00")
+                                            )
+                                            if pr.get("updated_at")
+                                            else None
+                                        ),
                                         html_url=pr.get("html_url") or "No URL",
                                         diff_url=pr.get("diff_url") or "No URL",
                                         user=pr.get("user", {}).get("login")
                                         or "No User",
+                                        state=pr.get("state"),
+                                        body=pr.get("body"),
                                     )
                                 )
 
-                return closed_prs_list
+                # sort the result across all repos
+                def sort_func(pr1: GithubPullRequest) -> Union[datetime, int, None]:
+                    if sort_by == "created":
+                        return pr1.created_at
+                    elif sort_by == "updated":
+                        return pr1.updated_at
+                    else:
+                        return pr1.created_at
+
+                closed_prs_list = sorted(
+                    closed_prs_list,
+                    key=sort_func,  # type: ignore[arg-type]
+                    reverse=(
+                        True
+                        if not sort_by_direction or sort_by_direction == "desc"
+                        else False
+                    ),
+                )
+                closed_prs_list = (
+                    closed_prs_list[:max_pull_requests]
+                    if max_pull_requests
+                    else closed_prs_list
+                )
+
+                return GithubPullRequestResult(
+                    pull_requests=closed_prs_list, query=query, error=None
+                )
 
             except Exception as e:
                 self.logger.error(f"Error retrieving PRs: {e}")
-                raise
+                return GithubPullRequestResult(
+                    pull_requests=[], query=query, error=str(e)
+                )
 
     # noinspection PyMethodMayBeStatic
     def summarize_prs_by_engineer(
@@ -316,6 +428,8 @@ class GithubPullRequestHelper:
                 )
                 pr_response.raise_for_status()
 
+                # self.logger.info(f"PR Response:\n{pr_response.text}")
+
                 return pr_response.text
 
             except Exception as e:
@@ -326,7 +440,7 @@ class GithubPullRequestHelper:
         self,
         *,
         pr_counts: Dict[str, GithubPullRequestPerContributorInfo],
-        output_file: Optional[str] = None,
+        output_file: str,
     ) -> None:
         """
         Export PR count results to console and optional file.
@@ -335,22 +449,93 @@ class GithubPullRequestHelper:
             pr_counts (Dict[str, GithubPullRequestPerContributorInfo]): PR counts by engineer
             output_file (Optional[str]): Path to output file
         """
-        # Print results to console
-        self.logger.info("\n------ Closed PRs by Engineer ------\n")
-        for engineer, info in pr_counts.items():
-            self.logger.info(f"{engineer} | {info.pull_request_count} | {info.repos}")
-        self.logger.info("\n------------------------------------\n")
+        assert output_file, "Output file path is required"
+        assert pr_counts, "PR counts are required"
 
-        # Optional file export
-        if output_file:
+        try:
+            with open(output_file, "w") as f:
+                f.write(self.export_results_as_csv(pr_counts=pr_counts))
+            self.logger.info(f"Results exported to {output_file}")
+        except IOError as e:
+            self.logger.error(f"Failed to export results: {e}")
+
+    # noinspection PyMethodMayBeStatic
+    def export_results_as_csv(
+        self,
+        *,
+        pr_counts: Dict[str, GithubPullRequestPerContributorInfo],
+    ) -> str:
+        """
+        Export PR count results to console and optional file.
+
+        Args:
+            pr_counts (Dict[str, GithubPullRequestPerContributorInfo]): PR counts by engineer
+        """
+
+        result: str = "Contributor,PullRequests,Repos\n"
+        for engineer, info in pr_counts.items():
+            repos_text: str = " | ".join(info.repos) if info.repos else ""
+            result += f'{engineer},{info.pull_request_count},"{repos_text}"\n'
+        return result
+
+    async def get_pr_info(self, *, pr_url: str) -> GithubPullRequest:
+        """
+        Async method to fetch information for a given GitHub PR URL.
+
+        Args:
+            pr_url (str): Full GitHub PR URL
+
+        Returns:
+            GithubPullRequest: The pull request information
+        """
+        assert self.org_name, "Organization name is required"
+        assert self.github_access_token, "GitHub access token is required"
+
+        async with self.http_client_factory.create_http_client(
+            base_url=self.base_url
+        ) as client:
             try:
-                with open(output_file, "w") as f:
-                    f.write("Contributor\tPR Count\tRepos\n")
-                    for engineer, info in pr_counts.items():
-                        repos_text: str = " | ".join(info.repos) if info.repos else ""
-                        f.write(
-                            f"{engineer}\t{info.pull_request_count}\t{repos_text}\n"
+                # Parse the PR URL
+                pr_details: Dict[str, Any] = self.parse_pr_url(pr_url=pr_url)
+
+                # Construct PR URL
+                pr_url = f"{self.base_url}/repos/{pr_details['owner']}/{pr_details['repo']}/pulls/{pr_details['pr_number']}"
+                headers: Dict[str, str] = {
+                    "Authorization": f"Bearer {self.github_access_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "AsyncGithubPullRequestHelper",
+                }
+                # Fetch PR details
+                pr_response: Response = await client.get(
+                    url=pr_url, headers=headers, follow_redirects=True
+                )
+                pr_response.raise_for_status()
+                pr_data = pr_response.json()
+
+                return GithubPullRequest(
+                    pull_request_number=pr_data["number"],
+                    repo=pr_data["base"]["repo"]["name"],
+                    user=pr_data["user"]["login"],
+                    title=pr_data["title"],
+                    created_at=datetime.fromisoformat(
+                        pr_data["created_at"].replace("Z", "+00:00")
+                    ),
+                    closed_at=(
+                        datetime.fromisoformat(
+                            pr_data["closed_at"].replace("Z", "+00:00")
                         )
-                self.logger.info(f"Results exported to {output_file}")
-            except IOError as e:
-                self.logger.error(f"Failed to export results: {e}")
+                        if pr_data.get("closed_at")
+                        else None
+                    ),
+                    updated_at=datetime.fromisoformat(
+                        pr_data["updated_at"].replace("Z", "+00:00")
+                    ),
+                    html_url=pr_data["html_url"],
+                    diff_url=pr_data.get("diff_url"),
+                    state=pr_data["state"],
+                    body=pr_data.get("body"),
+                )
+
+            except Exception as e:
+                self.logger.error(f"Error fetching PR information: {e}")
+                raise

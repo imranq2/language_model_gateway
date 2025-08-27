@@ -4,8 +4,8 @@ import os
 from typing import Optional, List
 from uuid import uuid4
 
-import boto3
 from pypdf import PdfReader, PdfWriter
+from types_boto3_textract.client import TextractClient
 
 from language_model_gateway.gateway.aws.aws_client_factory import AwsClientFactory
 from language_model_gateway.gateway.file_managers.file_manager import FileManager
@@ -41,8 +41,8 @@ class AwsOCRExtractor(OCRExtractor):
         """
         try:
             # Create Textract client
-            textract_client: boto3.client = self.aws_client_factory.create_client(
-                service_name="textract"
+            textract_client: TextractClient = (
+                self.aws_client_factory.create_textract_client()
             )
 
             # Open PDF from memory
@@ -108,9 +108,9 @@ class AwsOCRExtractor(OCRExtractor):
             # first save the file to s3
             # Save the file to S3
             image_generation_path_ = os.environ["IMAGE_GENERATION_PATH"]
-            assert (
-                image_generation_path_
-            ), "IMAGE_GENERATION_PATH environment variable is not set"
+            assert image_generation_path_, (
+                "IMAGE_GENERATION_PATH environment variable is not set"
+            )
             image_file_name: str = f"{uuid4()}.pdf"
 
             file_manager: FileManager = self.file_manager_factory.get_file_manager(
@@ -125,8 +125,8 @@ class AwsOCRExtractor(OCRExtractor):
             assert file_path is not None
 
             # Call Textract API
-            textract_client: boto3.client = self.aws_client_factory.create_client(
-                service_name="textract"
+            textract_client: TextractClient = (
+                self.aws_client_factory.create_textract_client()
             )
 
             s3_bucket, s3_object_key = UrlParser.parse_s3_uri(file_path)

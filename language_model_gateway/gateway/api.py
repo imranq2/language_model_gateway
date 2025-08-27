@@ -7,6 +7,7 @@ from typing import AsyncGenerator, Annotated, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.params import Depends
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
@@ -86,13 +87,26 @@ def create_app() -> FastAPI:
 
     image_generation_path: str = environ["IMAGE_GENERATION_PATH"]
 
-    assert (
-        image_generation_path is not None
-    ), "IMAGE_GENERATION_PATH environment variable must be set"
+    assert image_generation_path is not None, (
+        "IMAGE_GENERATION_PATH environment variable must be set"
+    )
 
     makedirs(image_generation_path, exist_ok=True)
     app1.include_router(
         ImagesRouter(image_generation_path=image_generation_path).get_router()
+    )
+
+    # Set up CORS middleware; adjust parameters as needed
+    # noinspection PyTypeChecker
+    allowed_origins = environ.get("ALLOWED_ORIGINS", "").split(",")
+    if not allowed_origins or allowed_origins == [""]:
+        allowed_origins = ["*"]  # Allow all origins if not specified
+    app1.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     return app1
 
@@ -101,7 +115,7 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "POST"])
 async def health() -> str:
     return "OK"
 

@@ -31,6 +31,8 @@ from language_model_gateway.gateway.providers.openai_chat_completions_provider i
 from language_model_gateway.gateway.schema.openai.completions import ChatRequest
 from openai.types.chat.chat_completion_chunk import ChoiceDelta, Choice as ChunkChoice
 
+from language_model_gateway.gateway.utilities.exception_logger import ExceptionLogger
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,9 +82,9 @@ class ChatCompletionManager:
             model: str = chat_request["model"]
             assert model is not None
 
-            configs: List[ChatModelConfig] = (
-                await self.config_reader.read_model_configs_async()
-            )
+            configs: List[
+                ChatModelConfig
+            ] = await self.config_reader.read_model_configs_async()
 
             # Find the model config
             model_config: ChatModelConfig | None = next(
@@ -124,14 +126,25 @@ class ChatCompletionManager:
                     f"Running chat completion for {chat_request} with headers {headers}"
                 )
             # Use the provider to get the completions
-            response: StreamingResponse | JSONResponse = (
-                await provider.chat_completions(
-                    model_config=model_config,
-                    headers=headers,
-                    chat_request=chat_request,
-                )
+            response: (
+                StreamingResponse | JSONResponse
+            ) = await provider.chat_completions(
+                model_config=model_config,
+                headers=headers,
+                chat_request=chat_request,
             )
             return response
+        except ExceptionGroup as e:
+            # if there is just one exception, we can log it directly
+            if len(e.exceptions) == 1:
+                logger.error(
+                    f"ExceptionGroup in chat completion: {e.exceptions[0]}",
+                    exc_info=True,
+                )
+                return await self.handle_exception(
+                    chat_request=chat_request, e=e.exceptions[0]
+                )
+            return await self.handle_exception(chat_request=chat_request, e=e)
         except Exception as e:
             return await self.handle_exception(chat_request=chat_request, e=e)
 
@@ -241,7 +254,7 @@ class ChatCompletionManager:
         )
         if should_stream_response:
 
-            async def foo(
+            async def stream_response(
                 response_messages1: List[ChatCompletionMessage],
             ) -> AsyncGenerator[str, None]:
                 for response_message in response_messages1:
@@ -270,7 +283,7 @@ class ChatCompletionManager:
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
-                content=foo(response_messages1=response_messages),
+                content=stream_response(response_messages1=response_messages),
                 media_type="text/event-stream",
             )
         else:
@@ -298,8 +311,14 @@ class ChatCompletionManager:
     async def handle_exception(
         self, *, chat_request: ChatRequest, e: Exception
     ) -> StreamingResponse | JSONResponse:
-        logger.error(f"Error in chat completion: {e}")
+        logger.error(
+            f"Error in chat completion: {e} {type(e)} {e.__dict__.keys()}",
+            exc_info=True,
+        )
+        content = ExceptionLogger.extract_error_details(e)
         return self.write_response(
             chat_request=chat_request,
-            response_messages=[ChatCompletionMessage(role="assistant", content=str(e))],
+            response_messages=[
+                ChatCompletionMessage(role="assistant", content=content)
+            ],
         )

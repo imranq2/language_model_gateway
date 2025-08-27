@@ -15,6 +15,12 @@ from language_model_gateway.gateway.image_generation.image_generator_factory imp
     ImageGeneratorFactory,
 )
 from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtractorFactory
+from language_model_gateway.gateway.tools.confluence_page_retriever import (
+    ConfluencePageRetriever,
+)
+from language_model_gateway.gateway.tools.confluence_search_tool import (
+    ConfluenceSearchTool,
+)
 from language_model_gateway.gateway.tools.current_time_tool import CurrentTimeTool
 from langchain_community.tools.pubmed.tool import PubmedQueryRun
 
@@ -24,19 +30,33 @@ from language_model_gateway.gateway.tools.er_diagram_generator_tool import (
 from language_model_gateway.gateway.tools.flow_chart_generator_tool import (
     FlowChartGeneratorTool,
 )
+from language_model_gateway.gateway.tools.health_summary_generator_tool import (
+    HealthSummaryGeneratorTool,
+)
 from language_model_gateway.gateway.tools.github_pull_request_analyzer_tool import (
     GitHubPullRequestAnalyzerTool,
 )
 from language_model_gateway.gateway.tools.github_pull_request_diff_tool import (
     GitHubPullRequestDiffTool,
 )
+from language_model_gateway.gateway.tools.github_pull_request_retriever_tool import (
+    GitHubPullRequestRetriever,
+)
 from language_model_gateway.gateway.tools.google_search_tool import GoogleSearchTool
 from language_model_gateway.gateway.tools.graph_viz_diagram_generator_tool import (
     GraphVizDiagramGeneratorTool,
 )
+from language_model_gateway.gateway.tools.fhir_graphql_schema_provider import (
+    GraphqlSchemaProviderTool,
+)
 from language_model_gateway.gateway.tools.image_generator_tool import ImageGeneratorTool
 from language_model_gateway.gateway.tools.jira_issues_analyzer_tool import (
     JiraIssuesAnalyzerTool,
+)
+from language_model_gateway.gateway.tools.databricks_sql_tool import DatabricksSQLTool
+
+from language_model_gateway.gateway.tools.jira_issue_retriever import (
+    JiraIssueRetriever,
 )
 from language_model_gateway.gateway.tools.network_topology_diagram_tool import (
     NetworkTopologyGeneratorTool,
@@ -51,6 +71,19 @@ from language_model_gateway.gateway.tools.sequence_diagram_generator_tool import
     SequenceDiagramGeneratorTool,
 )
 from language_model_gateway.gateway.tools.url_to_markdown_tool import URLToMarkdownTool
+from language_model_gateway.gateway.tools.calculator_average_tool import (
+    CalculatorAverageTool,
+)
+from language_model_gateway.gateway.tools.calculator_stddev_tool import (
+    CalculatorStddevTool,
+)
+from language_model_gateway.gateway.tools.calculator_sum_tool import CalculatorSumTool
+from language_model_gateway.gateway.tools.calculator_length_tool import (
+    CalculatorLengthTool,
+)
+from language_model_gateway.gateway.utilities.confluence.confluence_helper import (
+    ConfluenceHelper,
+)
 from language_model_gateway.gateway.utilities.environment_variables import (
     EnvironmentVariables,
 )
@@ -59,6 +92,9 @@ from language_model_gateway.gateway.utilities.github.github_pull_request_helper 
 )
 from language_model_gateway.gateway.utilities.jira.jira_issues_helper import (
     JiraIssueHelper,
+)
+from language_model_gateway.gateway.utilities.databricks.databricks_helper import (
+    DatabricksHelper,
 )
 
 
@@ -72,6 +108,8 @@ class ToolProvider:
         environment_variables: EnvironmentVariables,
         github_pull_request_helper: GithubPullRequestHelper,
         jira_issues_helper: JiraIssueHelper,
+        confluence_helper: ConfluenceHelper,
+        databricks_helper: DatabricksHelper,
     ) -> None:
         web_search_tool: BaseTool
         default_web_search_tool: str = environ.get(
@@ -89,6 +127,10 @@ class ToolProvider:
 
         self.tools: Dict[str, BaseTool] = {
             "current_date": CurrentTimeTool(),
+            "calculator_average": CalculatorAverageTool(),
+            "calculator_stddev": CalculatorStddevTool(),
+            "calculator_sum": CalculatorSumTool(),
+            "calculator_length": CalculatorLengthTool(),
             "web_search": web_search_tool,
             "pubmed": PubmedQueryRun(),
             "google_search": GoogleSearchTool(),
@@ -96,6 +138,9 @@ class ToolProvider:
             "python_repl": PythonReplTool(),
             "get_web_page": URLToMarkdownTool(),
             "arxiv_search": ArxivQueryRun(),
+            "health_summary_generator": HealthSummaryGeneratorTool(
+                file_manager_factory=file_manager_factory,
+            ),
             "image_generator": ImageGeneratorTool(
                 image_generator_factory=image_generator_factory,
                 file_manager_factory=file_manager_factory,
@@ -137,6 +182,22 @@ class ToolProvider:
             "jira_issues_analyzer": JiraIssuesAnalyzerTool(
                 jira_issues_helper=jira_issues_helper
             ),
+            "databricks_query_validator": DatabricksSQLTool(
+                databricks_helper=databricks_helper
+            ),
+            "fhir_graphql_schema_provider": GraphqlSchemaProviderTool(),
+            "jira_issue_retriever": JiraIssueRetriever(
+                jira_issues_helper=jira_issues_helper
+            ),
+            "github_pull_request_retriever": GitHubPullRequestRetriever(
+                github_pull_request_helper=github_pull_request_helper
+            ),
+            "confluence_search_tool": ConfluenceSearchTool(
+                confluence_helper=confluence_helper
+            ),
+            "confluence_page_retriever": ConfluencePageRetriever(
+                confluence_helper=confluence_helper
+            ),
             # "sql_query": QuerySQLDataBaseTool(
             #     db=SQLDatabase(
             #         engine=Engine(
@@ -148,10 +209,21 @@ class ToolProvider:
             # ),
         }
 
-    def get_tool_by_name(self, *, tool: AgentConfig) -> BaseTool:
+    def get_tool_by_name(
+        self, *, tool: AgentConfig, headers: Dict[str, str]
+    ) -> BaseTool:
         if tool.name in self.tools:
             return self.tools[tool.name]
         raise ValueError(f"Tool with name {tool.name} not found")
 
-    def get_tools(self, *, tools: list[AgentConfig]) -> list[BaseTool]:
-        return [self.get_tool_by_name(tool=tool) for tool in tools]
+    def has_tool(self, *, tool: AgentConfig) -> bool:
+        return tool.name in self.tools
+
+    def get_tools(
+        self, *, tools: list[AgentConfig], headers: Dict[str, str]
+    ) -> list[BaseTool]:
+        return [
+            self.get_tool_by_name(tool=tool, headers=headers)
+            for tool in tools
+            if self.has_tool(tool=tool)
+        ]

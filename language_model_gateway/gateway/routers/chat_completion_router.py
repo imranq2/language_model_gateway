@@ -58,6 +58,16 @@ class ChatCompletionsRouter:
             response_description="Chat completions",
             status_code=200,
         )
+        self.router.add_api_route(
+            "/chat/completion",
+            self.chat_completions,
+            methods=["POST"],
+            response_model=None,
+            summary="Complete a chat prompt",
+            description="Completes a chat prompt using the specified model",
+            response_description="Chat completions",
+            status_code=200,
+        )
 
     # noinspection PyMethodMayBeStatic
     async def chat_completions(
@@ -85,7 +95,8 @@ class ChatCompletionsRouter:
 
         try:
             return await chat_manager.chat_completions(
-                headers={k: v for k, v in request.headers.items()},
+                # convert headers to lowercase to match OpenAI API expectations
+                headers={k.lower(): v for k, v in request.headers.items()},
                 chat_request=cast(ChatRequest, chat_request),
             )
         except* TokenRetrievalError as e:

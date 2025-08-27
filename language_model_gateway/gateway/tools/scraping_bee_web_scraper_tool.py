@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 class ScrapingBeeWebScraperToolInput(BaseModel):
     url: str = Field(description="url of the webpage to scrape")
     query: Optional[str] = Field(description="Query to search for on the webpage")
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class ScrapingBeeWebScraperTool(ResilientBaseTool):
@@ -112,19 +116,29 @@ class ScrapingBeeWebScraperTool(ResilientBaseTool):
                 html_content=html_content
             )
 
-    def _run(self, url: str, query: Optional[str] = None) -> Tuple[str, str]:
+    def _run(
+        self,
+        url: str,
+        query: Optional[str] = None,
+        use_verbose_logging: Optional[bool] = None,
+    ) -> Tuple[str, str]:
         """Synchronous run method required by LangChain"""
         raise NotImplementedError("Use async version of this tool")
 
-    async def _arun(self, url: str, query: Optional[str] = None) -> Tuple[str, str]:
+    async def _arun(
+        self,
+        url: str,
+        query: Optional[str] = None,
+        use_verbose_logging: Optional[bool] = None,
+    ) -> Tuple[str, str]:
         """Async run method"""
 
         content: Optional[str] = await self._async_scrape(url=url, query=query)
         if content:
-            return (
-                await self._extract_text_content_async(content),
-                f"ScrapingBeeWebScraperAgent: Scraped content using ScrapingBee from <{url}> ",
-            )
+            artifact: str = f"ScrapingBeeWebScraperAgent: Scraped content using ScrapingBee from <{url}> "
+            if use_verbose_logging:
+                logger.info(f"\n```\n{content}\n```")
+            return await self._extract_text_content_async(content), artifact
         else:
             return (
                 "Error: Failed to scrape the webpage.",

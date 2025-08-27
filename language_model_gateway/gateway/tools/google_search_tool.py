@@ -15,6 +15,10 @@ logger = logging.getLogger(__file__)
 
 class GoogleSearchToolInput(BaseModel):
     query: str = Field(description="The search query to send to Google Search")
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class GoogleSearchTool(ResilientBaseTool):
@@ -117,11 +121,15 @@ class GoogleSearchTool(ResilientBaseTool):
         """Close the HTTP client."""
         await self._client.aclose()
 
-    def _run(self, query: str) -> Tuple[str, str]:
+    def _run(
+        self, query: str, use_verbose_logging: Optional[bool] = None
+    ) -> Tuple[str, str]:
         """Use async version of this tool."""
         raise NotImplementedError("Use async version of this tool")
 
-    async def _arun(self, query: str) -> Tuple[str, str]:
+    async def _arun(
+        self, query: str, use_verbose_logging: Optional[bool] = None
+    ) -> Tuple[str, str]:
         """Async implementation of the Google search tool."""
 
         assert self._api_key, "GOOGLE_API_KEY environment variable is required"
@@ -148,7 +156,11 @@ class GoogleSearchTool(ResilientBaseTool):
             response: str = "\n".join(snippets)
             if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
                 logger.info(f"Google Search results: {response}")
-            return response, f'GoogleSearchAgent: Searched Google for "{query}"'
+
+            artifact: str = f'GoogleSearchAgent: Searched Google for "{query}"'
+            if use_verbose_logging:
+                artifact += f"\n```{response}```"
+            return response, artifact
         except Exception as e:
             logger.exception(e, stack_info=True)
             return (

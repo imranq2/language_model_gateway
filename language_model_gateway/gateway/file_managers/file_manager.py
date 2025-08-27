@@ -14,7 +14,7 @@ class FileManager:
         file_data: bytes,
         folder: str,
         filename: str,
-        content_type: str = "image/png"
+        content_type: str = "image/png",
     ) -> Optional[str]:
         raise NotImplementedError("Must be implemented in a subclass")
 
@@ -26,3 +26,18 @@ class FileManager:
         self, *, folder: str, file_path: str
     ) -> StreamingResponse | Response:
         raise NotImplementedError("Must be implemented in a subclass")
+
+    @staticmethod
+    async def extract_content(response: StreamingResponse) -> str:
+        """
+        Extracts and returns content from a streaming response.
+        :param response: (StreamingResponse) s3 response for the file
+        :return: returns the file content in string format.
+        """
+        extracted_content = ""
+        async for chunk in response.body_iterator:
+            # Decode the chunk, assuming it is UTF-8 encoded
+            assert isinstance(chunk, bytes)
+            extracted_content += chunk.decode("utf-8")
+
+        return extracted_content

@@ -7,7 +7,7 @@ on:
 
 env:
   IMAGE_NAME: language_model_gateway
-  REPOSITORY_URL: imranq2
+  REPOSITORY_URL: icanbwell
 
 jobs:
   push:
@@ -36,6 +36,8 @@ jobs:
 
       - name: Install QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
 
       - name: Create builder
         run: |
@@ -51,6 +53,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
+            --target production \
             -t $REPOSITORY_URL/$IMAGE_NAME:$TAG \
             -t $REPOSITORY_URL/$IMAGE_NAME:latest \
             --push \

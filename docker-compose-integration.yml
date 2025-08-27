@@ -1,0 +1,4 @@
+services:
+  dev:
+    environment:
+      RUN_TESTS_WITH_REAL_LLM: 1

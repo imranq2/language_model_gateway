@@ -36,6 +36,10 @@ class PDFExtractionToolInput(BaseModel):
         default=False,
         description="Use OCR (Optical Character Recognition) if text extraction fails",
     )
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class PDFExtractionTool(ResilientBaseTool):
@@ -61,6 +65,7 @@ class PDFExtractionTool(ResilientBaseTool):
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,
         use_ocr: bool = False,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Synchronous version of the tool (falls back to async implementation).
@@ -79,6 +84,7 @@ class PDFExtractionTool(ResilientBaseTool):
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,
         use_ocr: bool = False,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Asynchronous version of the tool with OCR support.
@@ -89,6 +95,7 @@ class PDFExtractionTool(ResilientBaseTool):
             start_page (Optional[int]): Starting page for extraction
             end_page (Optional[int]): Ending page for extraction
             use_ocr (bool): Use AWS Textract for OCR if text extraction fails
+            use_verbose_logging (Optional[bool]): Whether to enable verbose logging
 
         Returns:
             Tuple of extracted text and artifact description
@@ -152,6 +159,8 @@ class PDFExtractionTool(ResilientBaseTool):
                 f"PDFExtractionAgent: Extracted text from pages {start} to {end} "
                 f"(Total pages: {total_pages}, OCR: {'Yes' if use_ocr else 'No'})"
             )
+            if use_verbose_logging:
+                artifact += f"\n===== Extracted text =====\n```{full_text}```\n====== End of Text ======"
 
             return full_text.strip(), artifact
 

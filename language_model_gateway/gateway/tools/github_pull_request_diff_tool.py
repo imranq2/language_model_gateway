@@ -19,6 +19,10 @@ class GitHubPullRequestDiffAgentDiffInput(BaseModel):
         title="Pull Request URL",
         description="URL of the GitHub pull request to analyze",
     )
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class GitHubPullRequestDiffTool(ResilientBaseTool):
@@ -37,6 +41,7 @@ class GitHubPullRequestDiffTool(ResilientBaseTool):
     def _run(
         self,
         url: Optional[str] = None,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Synchronous version of the tool (falls back to async implementation).
@@ -49,6 +54,7 @@ class GitHubPullRequestDiffTool(ResilientBaseTool):
     async def _arun(
         self,
         url: Optional[str] = None,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Asynchronous version of the GitHub Pull Request extraction tool.
@@ -65,7 +71,8 @@ class GitHubPullRequestDiffTool(ResilientBaseTool):
             )
             # Create artifact description
             artifact = f"GitHubPullRequestDiffAgent: Downloaded diff for {url}"
-
+            if use_verbose_logging:
+                artifact += f"\n===== Content =====\n```{diff_content}```\n===== End of Content ====="
             return diff_content, artifact
 
         except Exception as e:

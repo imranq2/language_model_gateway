@@ -1,13 +1,12 @@
 import json
 import logging
 import os
+import re
 import time
 from typing import (
     Any,
     List,
     Sequence,
-    Union,
-    Literal,
     cast,
     Optional,
     Tuple,
@@ -18,23 +17,23 @@ from typing import (
     Iterable,
 )
 
+from botocore.exceptions import TokenRetrievalError
 from fastapi import HTTPException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
-    BaseMessage,
     ToolMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
 )
 from langchain_core.messages import AIMessageChunk
 from langchain_core.messages.ai import UsageMetadata
-from langchain_core.prompt_values import PromptValue
-from langchain_core.runnables import Runnable
 from langchain_core.runnables.schema import CustomStreamEvent, StandardStreamEvent
 from langchain_core.tools import BaseTool
-from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, create_react_agent
 from openai import NotGiven, NOT_GIVEN
 from openai.types import CompletionUsage
 from openai.types.chat import (
@@ -75,7 +74,8 @@ class LangGraphToOpenAIConverter:
         *,
         request: ChatRequest,
         request_id: str,
-        compiled_state_graph: CompiledStateGraph,
+        headers: Dict[str, str],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
         messages: List[ChatCompletionMessageParam],
     ) -> AsyncGenerator[str, None]:
         """
@@ -84,6 +84,7 @@ class LangGraphToOpenAIConverter:
         Args:
             request: The chat request.
             request_id: The unique request identifier.
+            headers: The request headers.
             compiled_state_graph: The compiled state graph.
             messages: The list of chat completion message parameters.
 
@@ -95,6 +96,7 @@ class LangGraphToOpenAIConverter:
             event: StandardStreamEvent | CustomStreamEvent
             async for event in self.astream_events(
                 request=request,
+                headers=headers,
                 compiled_state_graph=compiled_state_graph,
                 messages=messages,
             ):
@@ -135,15 +137,15 @@ class LangGraphToOpenAIConverter:
                                 content
                             )
 
-                            assert isinstance(
-                                content_text, str
-                            ), f"content_text: {content_text} (type: {type(content_text)})"
+                            assert isinstance(content_text, str), (
+                                f"content_text: {content_text} (type: {type(content_text)})"
+                            )
 
                             if (
                                 os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1"
                                 and content_text
                             ):
-                                logger.info(f"Returning content: {content_text}")
+                                logger.debug(f"Returning content: {content_text}")
 
                             if content_text:
                                 chat_model_stream_response: ChatCompletionChunk = (
@@ -199,8 +201,19 @@ class LangGraphToOpenAIConverter:
                         tool_input: Dict[str, Any] | None = event.get("data", {}).get(
                             "input"
                         )
+
+                        # copy the tool_input to avoid modifying the original
+                        tool_input_display = (
+                            tool_input.copy() if tool_input is not None else None
+                        )
+                        # remove auth_token from tool_input
+                        if tool_input_display and "auth_token" in tool_input_display:
+                            tool_input_display["auth_token"] = "***"
+
                         if tool_name:
-                            logger.debug(f"on_tool_start: {tool_name} {tool_input}")
+                            logger.debug(
+                                f"on_tool_start: {tool_name} {tool_input_display}"
+                            )
                             chat_stream_response = ChatCompletionChunk(
                                 id=request_id,
                                 created=int(time.time()),
@@ -210,7 +223,7 @@ class LangGraphToOpenAIConverter:
                                         index=0,
                                         delta=ChoiceDelta(
                                             role="assistant",
-                                            content=f"\n\n> Running Agent {tool_name}: {tool_input}\n",
+                                            content=f"\n\n> Running Agent {tool_name}: {tool_input_display}\n",
                                         ),
                                     )
                                 ],
@@ -261,6 +274,28 @@ class LangGraphToOpenAIConverter:
                     case _:
                         # Handle other event types
                         pass
+        except TokenRetrievalError as e:
+            logger.exception(e, stack_info=True)
+            message: str = f"Token retrieval error: {e}.  If you are running locally, your AWS session may have expired.  Please re-authenticate using `aws sso login --profile [role]`."
+            chat_stream_response = ChatCompletionChunk(
+                id=request_id,
+                created=int(time.time()),
+                model=request["model"],
+                choices=[
+                    ChunkChoice(
+                        index=0,
+                        delta=ChoiceDelta(
+                            role="assistant",
+                            content=f"\n{message}\n",
+                        ),
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0
+                ),
+                object="chat.completion.chunk",
+            )
+            yield f"data: {json.dumps(chat_stream_response.model_dump())}\n\n"
         except Exception as e:
             chat_stream_response = ChatCompletionChunk(
                 id=request_id,
@@ -287,9 +322,10 @@ class LangGraphToOpenAIConverter:
     async def call_agent_with_input(
         self,
         *,
+        headers: Dict[str, str],
         chat_request: ChatRequest,
         request_id: str,
-        compiled_state_graph: CompiledStateGraph,
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
         system_messages: List[ChatCompletionSystemMessageParam],
     ) -> StreamingResponse | JSONResponse:
         """
@@ -297,6 +333,7 @@ class LangGraphToOpenAIConverter:
 
         Args:
             chat_request: The chat request.
+            headers: request headers
             request_id: The unique request identifier.
             compiled_state_graph: The compiled state graph.
             system_messages: The list of chat completion message parameters.
@@ -305,11 +342,11 @@ class LangGraphToOpenAIConverter:
             The response as a StreamingResponse or JSONResponse.
         """
         assert chat_request is not None
-        assert isinstance(chat_request, dict)
 
         if chat_request.get("stream"):
             return StreamingResponse(
                 await self.get_streaming_response_async(
+                    headers=headers,
                     request=chat_request,
                     request_id=request_id,
                     compiled_state_graph=compiled_state_graph,
@@ -326,6 +363,7 @@ class LangGraphToOpenAIConverter:
 
                 responses: List[AnyMessage] = await self.ainvoke(
                     compiled_state_graph=compiled_state_graph,
+                    headers=headers,
                     request=chat_request,
                     system_messages=system_messages,
                 )
@@ -387,9 +425,25 @@ class LangGraphToOpenAIConverter:
                     object="chat.completion",
                 )
                 return JSONResponse(content=chat_response.model_dump())
-            except Exception as e:
+            except* TokenRetrievalError as e:
                 logger.exception(e, stack_info=True)
-                raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Token retrieval error: {type(e)} {e}.  If you are running locally, your AWS session may have expired.  Please re-authenticate using `aws sso login --profile [role]`.",
+                )
+            except* Exception as e:
+                logger.exception(e, stack_info=True)
+                # print type of first exception in ExceptionGroup
+                # if there is just one exception, we can log it directly
+                if len(e.exceptions) > 0:
+                    logger.error(
+                        f"ExceptionGroup in call_agent_with_input: {type(e.exceptions[0])} {e.exceptions[0]}",
+                        exc_info=True,
+                    )
+
+                raise HTTPException(
+                    status_code=500, detail=f"Unexpected error: {type(e)} {e}"
+                )
 
     @staticmethod
     def add_system_messages_for_json(
@@ -415,9 +469,9 @@ class LangGraphToOpenAIConverter:
                 return chat_request, json_response_requested
             case "json_object":
                 json_response_requested = True
-                json_object_system_message_text: str = """                
+                json_object_system_message_text: str = """
                 Respond only with a JSON object or array.
-                
+
                 Output follows this example format:
                 <json>
                 json  here
@@ -430,6 +484,7 @@ class LangGraphToOpenAIConverter:
                 chat_request["messages"] = [r for r in chat_request["messages"]] + [
                     json_object_system_message
                 ]
+                return chat_request, json_response_requested
             case "json_schema":
                 json_response_requested = True
                 json_response_format: ResponseFormatJSONSchema = cast(
@@ -437,13 +492,13 @@ class LangGraphToOpenAIConverter:
                     response_format,
                 )
                 json_schema: JSONSchema | None = json_response_format.get("json_schema")
-                assert (
-                    json_schema is not None
-                ), "json_schema should be specified in response_format if type is json_schema"
-                json_schema_system_message_text: str = f"""                
+                assert json_schema is not None, (
+                    "json_schema should be specified in response_format if type is json_schema"
+                )
+                json_schema_system_message_text: str = f"""
                 Respond only with a JSON object or array using the provided schema:
-                ```{json_schema}``` 
-    
+                ```{json_schema}```
+
                 Output follows this example format:
                 <json>
                 json  here
@@ -456,11 +511,11 @@ class LangGraphToOpenAIConverter:
                 chat_request["messages"] = [r for r in chat_request["messages"]] + [
                     json_schema_system_message
                 ]
+                return chat_request, json_response_requested
             case _:
-                assert (
-                    False
-                ), f"Unexpected response format type: {response_format.get('type', None)}"
-        return chat_request, json_response_requested
+                raise ValueError(
+                    f"Unexpected response format type: {response_format.get('type', None)}"
+                )
 
     # noinspection PyMethodMayBeStatic
     def convert_usage_meta_data_to_openai(
@@ -479,9 +534,10 @@ class LangGraphToOpenAIConverter:
     async def get_streaming_response_async(
         self,
         *,
+        headers: Dict[str, str],
         request: ChatRequest,
         request_id: str,
-        compiled_state_graph: CompiledStateGraph,
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
         system_messages: List[ChatCompletionSystemMessageParam],
     ) -> AsyncGenerator[str, None]:
         """
@@ -489,6 +545,7 @@ class LangGraphToOpenAIConverter:
 
         Args:
             request: The chat request.
+            headers: The request headers.
             request_id: The unique request identifier.
             compiled_state_graph: The compiled state graph.
             system_messages: The list of chat completion message parameters.
@@ -508,6 +565,7 @@ class LangGraphToOpenAIConverter:
         generator: AsyncGenerator[str, None] = self._stream_resp_async_generator(
             request=request,
             request_id=request_id,
+            headers=headers,
             compiled_state_graph=compiled_state_graph,
             messages=messages,
         )
@@ -517,8 +575,10 @@ class LangGraphToOpenAIConverter:
     async def _run_graph_with_messages_async(
         self,
         *,
-        messages: List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]],
-        compiled_state_graph: CompiledStateGraph,
+        chat_request: ChatRequest,
+        headers: Dict[str, str],
+        messages: List[BaseMessage],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
     ) -> List[AnyMessage]:
         """
         Run the graph with the provided messages asynchronously.
@@ -530,10 +590,12 @@ class LangGraphToOpenAIConverter:
         Returns:
             The list of any messages.
         """
-        input1: Dict[str, List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]]] = {
-            "messages": messages
-        }
-        output: Dict[str, Any] = await compiled_state_graph.ainvoke(input=input1)
+
+        output: Dict[str, Any] = await compiled_state_graph.ainvoke(
+            input=self.create_state(
+                chat_request=chat_request, headers=headers, messages=messages
+            )
+        )
         out_messages: List[AnyMessage] = output["messages"]
         return out_messages
 
@@ -542,26 +604,29 @@ class LangGraphToOpenAIConverter:
         self,
         *,
         request: ChatRequest,
-        messages: List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]],
-        compiled_state_graph: CompiledStateGraph,
+        headers: Dict[str, str],
+        messages: List[BaseMessage],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
     ) -> AsyncGenerator[StandardStreamEvent | CustomStreamEvent, None]:
         """
         Stream the graph with the provided messages asynchronously.
 
         Args:
             request: The chat request.
+            headers: The request headers.
             messages: The list of role and incoming message type tuples.
             compiled_state_graph: The compiled state graph.
 
         Yields:
             The standard or custom stream event.
         """
-        input1: Dict[str, List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]]] = {
-            "messages": messages
-        }
+
         event: StandardStreamEvent | CustomStreamEvent
         async for event in compiled_state_graph.astream_events(
-            input=input1, version="v2"
+            input=self.create_state(
+                chat_request=request, headers=headers, messages=messages
+            ),
+            version="v2",
         ):
             yield event
 
@@ -570,7 +635,8 @@ class LangGraphToOpenAIConverter:
         self,
         *,
         request: ChatRequest,
-        compiled_state_graph: CompiledStateGraph,
+        headers: Dict[str, str],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
         system_messages: Iterable[ChatCompletionSystemMessageParam],
     ) -> List[AnyMessage]:
         """
@@ -578,6 +644,7 @@ class LangGraphToOpenAIConverter:
 
         Args:
             request: The chat request.
+            headers: The request headers.
             compiled_state_graph: The compiled state graph.
             system_messages: The iterable of chat completion message parameters.
 
@@ -585,7 +652,6 @@ class LangGraphToOpenAIConverter:
             The list of any messages.
         """
         assert request is not None
-        assert isinstance(request, dict)
 
         new_messages: List[ChatCompletionMessageParam] = [
             m for m in request["messages"]
@@ -595,6 +661,8 @@ class LangGraphToOpenAIConverter:
         ] + new_messages
 
         return await self._run_graph_with_messages_async(
+            chat_request=request,
+            headers=headers,
             compiled_state_graph=compiled_state_graph,
             messages=self.create_messages_for_graph(messages=messages),
         )
@@ -603,7 +671,8 @@ class LangGraphToOpenAIConverter:
         self,
         *,
         request: ChatRequest,
-        compiled_state_graph: CompiledStateGraph,
+        headers: Dict[str, str],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
         messages: Iterable[ChatCompletionMessageParam],
     ) -> AsyncGenerator[StandardStreamEvent | CustomStreamEvent, None]:
         """
@@ -611,6 +680,7 @@ class LangGraphToOpenAIConverter:
 
         Args:
             request: The chat request.
+            headers: The request headers.
             compiled_state_graph: The compiled state graph.
             messages: The iterable of chat completion message parameters.
 
@@ -620,6 +690,7 @@ class LangGraphToOpenAIConverter:
         event: StandardStreamEvent | CustomStreamEvent
         async for event in self._stream_graph_with_messages_async(
             request=request,
+            headers=headers,
             compiled_state_graph=compiled_state_graph,
             messages=self.create_messages_for_graph(messages=messages),
         ):
@@ -628,7 +699,7 @@ class LangGraphToOpenAIConverter:
     # noinspection PyMethodMayBeStatic
     def create_messages_for_graph(
         self, *, messages: Iterable[ChatCompletionMessageParam]
-    ) -> List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]]:
+    ) -> List[BaseMessage]:
         """
         Create messages for the graph.
 
@@ -638,40 +709,89 @@ class LangGraphToOpenAIConverter:
         Returns:
             The list of role and incoming message type tuples.
         """
-        return cast(
+        chat_messages: List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]] = cast(
             List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]],
             [(m["role"], m["content"]) for m in messages],
         )
+
+        messages_: List[BaseMessage] = []
+        for role, content in chat_messages:
+            match role:
+                case "system":
+                    messages_.append(
+                        SystemMessage(
+                            content=self.convert_incoming_message_content_to_string(
+                                content
+                            ),
+                            role="system",
+                        )
+                    )
+                case "user":
+                    messages_.append(
+                        HumanMessage(
+                            content=self.convert_incoming_message_content_to_string(
+                                content
+                            ),
+                            role="user",
+                        )
+                    )
+                case "assistant":
+                    messages_.append(
+                        AIMessage(
+                            content=self.convert_incoming_message_content_to_string(
+                                content
+                            ),
+                            role="assistant",
+                        )
+                    )
+                case "tool":
+                    messages_.append(
+                        ToolMessage(
+                            content=self.convert_incoming_message_content_to_string(
+                                content
+                            ),
+                            role="tool",
+                        )
+                    )
+                case _:
+                    raise ValueError(f"Unexpected role: {role}")
+
+        return messages_
 
     async def run_graph_async(
         self,
         *,
         request: ChatRequest,
-        compiled_state_graph: CompiledStateGraph,
+        headers: Dict[str, Any],
+        compiled_state_graph: CompiledStateGraph[MyMessagesState],
     ) -> List[AnyMessage]:
         """
         Run the graph asynchronously.
 
         Args:
             request: The chat request.
+            headers: The request headers.
             compiled_state_graph: The compiled state graph.
 
         Returns:
             The list of any messages.
         """
-        messages: List[tuple[ROLE_TYPES, INCOMING_MESSAGE_TYPES]] = (
-            self.create_messages_for_graph(messages=request["messages"])
+        messages: List[BaseMessage] = self.create_messages_for_graph(
+            messages=request["messages"]
         )
 
         output_messages: List[AnyMessage] = await self._run_graph_with_messages_async(
-            compiled_state_graph=compiled_state_graph, messages=messages
+            chat_request=request,
+            headers=headers,
+            compiled_state_graph=compiled_state_graph,
+            messages=messages,
         )
         return output_messages
 
     # noinspection PyMethodMayBeStatic
     async def create_graph_for_llm_async(
         self, *, llm: BaseChatModel, tools: Sequence[BaseTool]
-    ) -> CompiledStateGraph:
+    ) -> CompiledStateGraph[MyMessagesState]:
         """
         Create a graph for the language model asynchronously.
 
@@ -687,7 +807,7 @@ class LangGraphToOpenAIConverter:
     # noinspection PyMethodMayBeStatic
     async def _create_graph_for_llm_with_tools_async(
         self, *, llm: BaseChatModel, tools: Sequence[BaseTool]
-    ) -> CompiledStateGraph:
+    ) -> CompiledStateGraph[MyMessagesState]:
         """
         Create a graph for the language model asynchronously.
 
@@ -697,59 +817,14 @@ class LangGraphToOpenAIConverter:
         :return: compiled state graph
         """
         tool_node: ToolNode | None = None
-        model_with_tools: Runnable[
-            PromptValue
-            | str
-            | Sequence[
-                BaseMessage | list[str] | tuple[str, str] | str | dict[str, Any]
-            ],
-            BaseMessage,
-        ]
         if len(tools) > 0:
             tool_node = StreamingToolNode(tools)
-            model_with_tools = llm.bind_tools(tools)
-        else:
-            model_with_tools = llm
 
-        def should_continue(
-            state: MyMessagesState,
-        ) -> Union[Literal["tools"], str]:
-            messages: List[AnyMessage] = state["messages"]
-            last_message: AnyMessage = messages[-1]
-            # Check if it's an AIMessage and has tool calls
-            if isinstance(last_message, AIMessage) and getattr(
-                last_message, "tool_calls", None
-            ):
-                return "tools"
-            return END
-
-        async def call_model(state: MyMessagesState) -> MyMessagesState:
-            messages: List[AnyMessage] = state["messages"]
-            response: AnyMessage
-            usage_metadata: Optional[UsageMetadata] = None
-            base_message: BaseMessage = await model_with_tools.ainvoke(messages)
-            # assert isinstance(base_message, AnyMessage)
-            response = cast(AnyMessage, base_message)
-            usage_metadata = (
-                response.usage_metadata if hasattr(response, "usage_metadata") else None
-            )
-            return MyMessagesState(messages=[response], usage_metadata=usage_metadata)
-
-        workflow = StateGraph(MyMessagesState)
-
-        # Define the two nodes we will cycle between
-        workflow.add_node("agent", call_model)  # Now using async call_model
-        if len(tools) > 0:
-            assert tool_node is not None
-            workflow.add_node("tools", tool_node)
-
-        workflow.add_edge(START, "agent")
-        if len(tools) > 0:
-            workflow.add_conditional_edges("agent", should_continue, ["tools", END])
-            workflow.add_edge("tools", "agent")
-        workflow.add_edge("agent", END)
-
-        compiled_state_graph: CompiledStateGraph = workflow.compile()
+        compiled_state_graph: CompiledStateGraph[MyMessagesState] = create_react_agent(
+            model=llm,
+            tools=tool_node if tool_node is not None else [],
+            state_schema=MyMessagesState,
+        )
         return compiled_state_graph
 
     @staticmethod
@@ -771,3 +846,79 @@ class LangGraphToOpenAIConverter:
             completion_tokens=original.completion_tokens + new_one.completion_tokens,
             total_tokens=original.total_tokens + new_one.total_tokens,
         )
+
+    @staticmethod
+    def create_state(
+        *,
+        chat_request: ChatRequest,
+        headers: Dict[str, Any],
+        messages: List[BaseMessage],
+    ) -> MyMessagesState:
+        """
+        Create the state.
+        """
+
+        input1: MyMessagesState = MyMessagesState(
+            messages=messages,
+            auth_token=LangGraphToOpenAIConverter.get_auth_token_from_headers(
+                headers=headers
+            ),
+            usage_metadata=None,
+            remaining_steps=0,
+        )
+        return input1
+
+    @staticmethod
+    def get_auth_token_from_headers(headers: Dict[str, str]) -> Optional[str]:
+        """
+        Get the auth token from the headers.
+
+        Args:
+            headers: The headers.
+
+        Returns:
+            The auth token.
+        """
+        # Normalize headers to handle case-insensitive matching
+        normalized_headers = {k.lower(): v for k, v in headers.items()}
+
+        # Check for authorization header variations
+        auth_headers = ["authorization"]
+
+        for header_key in auth_headers:
+            header_value = normalized_headers.get(header_key.lower())
+
+            if header_value:
+                # Use regex to extract bearer token
+                match = re.search(r"Bearer\s+(\S+)", str(header_value), re.IGNORECASE)
+                if match:
+                    return match.group(1)
+
+        return None
+
+    @staticmethod
+    def convert_incoming_message_content_to_string(
+        content_: INCOMING_MESSAGE_TYPES,
+    ) -> str:
+        """
+        Convert the message content to a string.
+
+        Args:
+            content_: The message content.
+
+        Returns:
+            The message content as a string.
+        """
+        text: List[str] = []
+        if isinstance(content_, str):
+            text.append(content_)
+        elif isinstance(content_, list):
+            for content_item in content_:
+                content_item_type: Optional[str] = content_item.get("type")
+                if content_item_type == "text":
+                    text.append(content_item.get("text") or "")
+                else:
+                    raise ValueError(
+                        f"Unsupported content item type: {type(content_item)}: {content_item}"
+                    )
+        return "".join(text)

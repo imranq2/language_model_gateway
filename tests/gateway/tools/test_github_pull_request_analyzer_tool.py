@@ -10,6 +10,9 @@ from language_model_gateway.configs.config_schema import (
     ModelConfig,
     AgentConfig,
 )
+from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
+    ConfigExpiringCache,
+)
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
 from language_model_gateway.gateway.image_generation.image_generator_factory import (
@@ -22,7 +25,6 @@ from language_model_gateway.gateway.utilities.environment_reader import (
 from language_model_gateway.gateway.utilities.environment_variables import (
     EnvironmentVariables,
 )
-from language_model_gateway.gateway.utilities.expiring_cache import ExpiringCache
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_environment_variables import MockEnvironmentVariables
 from tests.gateway.mocks.mock_image_generator import MockImageGenerator
@@ -52,8 +54,8 @@ async def test_github_pull_request_analyzer_tool(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [
@@ -83,6 +85,7 @@ async def test_github_pull_request_analyzer_tool(
         api_key="fake-api-key",
         base_url="http://localhost:5000/api/v1",  # change the default port if needed
         http_client=async_client,
+        default_headers={"Authorization": "Bearer fake-api-key"},
     )
 
     # call API
@@ -131,8 +134,8 @@ async def test_github_pull_request_analyzer_tool_streaming(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [
@@ -162,6 +165,7 @@ async def test_github_pull_request_analyzer_tool_streaming(
         api_key="fake-api-key",
         base_url="http://localhost:5000/api/v1",  # change the default port if needed
         http_client=async_client,
+        default_headers={"Authorization": "Bearer fake-api-key"},
     )
 
     # call API
@@ -218,8 +222,8 @@ async def test_github_pull_request_analyzer_full_details_tool(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [
@@ -249,6 +253,7 @@ async def test_github_pull_request_analyzer_full_details_tool(
         api_key="fake-api-key",
         base_url="http://localhost:5000/api/v1",  # change the default port if needed
         http_client=async_client,
+        default_headers={"Authorization": "Bearer fake-api-key"},
     )
 
     # call API
@@ -256,7 +261,7 @@ async def test_github_pull_request_analyzer_full_details_tool(
         messages=[
             {
                 "role": "user",
-                "content": "List all the pull requests with title and author for the helix.pipelines repository for past 3 months",
+                "content": "List all the pull requests with title, author and description for the helix.pipelines repository for past 3 months",
             }
         ],
         model="General Purpose",

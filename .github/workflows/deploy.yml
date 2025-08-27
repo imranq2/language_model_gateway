@@ -1,0 +1,60 @@
+name: Deploy Workflow
+run-name: Deploy to ${{ inputs.env }} - ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        description: Tag to deploy
+        required: true
+      env:
+        type: choice
+        description: Environment to be deployed
+        required: true
+        options:
+          - dev
+          - staging
+          - perf
+          - prod
+          - client-sandbox
+
+env:
+  SERVICE_NAME: language_model_gateway
+  SERVICE_NAMESPACE: language_model_gateway-${{ inputs.env }}
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: main
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout icanbwell/cie.gha-deploy
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/v0.0.33
+          repository: icanbwell/cie.gha-deploy
+          token: ${{ secrets.BWELL_DEV_PAT }}
+          path: .github/actions/cie.gha-deploy
+
+      - name: Deploy
+        uses: ./.github/actions/cie.gha-deploy
+        with:
+          token: ${{ secrets.BWELL_DEV_PAT }}
+          service-name: $SERVICE_NAME
+          service-namespace: $SERVICE_NAMESPACE
+          env: '${{ inputs.env }}-ue1'
+          helm-chart-version: '1.1.8'
+          image-tag: ${{ github.event.inputs.tag }}
+
+      - name: 'Cleanup build folder'
+        if: always()
+        run: |
+          ls -la ./
+          sudo rm -rf ${{ github.workspace }}/*
+          ls -la ./

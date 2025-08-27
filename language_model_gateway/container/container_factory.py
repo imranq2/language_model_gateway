@@ -26,18 +26,30 @@ from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtracto
 from language_model_gateway.gateway.providers.image_generation_provider import (
     ImageGenerationProvider,
 )
-
 from language_model_gateway.gateway.providers.langchain_chat_completions_provider import (
     LangChainCompletionsProvider,
 )
 from language_model_gateway.gateway.providers.openai_chat_completions_provider import (
     OpenAiChatCompletionsProvider,
 )
+from language_model_gateway.gateway.tools.mcp_tool_provider import MCPToolProvider
 from language_model_gateway.gateway.tools.tool_provider import ToolProvider
+from language_model_gateway.gateway.utilities.auth.token_verifier import TokenVerifier
+from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
+    ConfigExpiringCache,
+)
+from language_model_gateway.gateway.utilities.cache.mcp_tools_expiring_cache import (
+    McpToolsMetadataExpiringCache,
+)
+from language_model_gateway.gateway.utilities.confluence.confluence_helper import (
+    ConfluenceHelper,
+)
+from language_model_gateway.gateway.utilities.databricks.databricks_helper import (
+    DatabricksHelper,
+)
 from language_model_gateway.gateway.utilities.environment_variables import (
     EnvironmentVariables,
 )
-from language_model_gateway.gateway.utilities.expiring_cache import ExpiringCache
 from language_model_gateway.gateway.utilities.github.github_pull_request_helper import (
     GithubPullRequestHelper,
 )
@@ -56,6 +68,41 @@ class ContainerFactory:
         container = SimpleContainer()
 
         # register services here
+
+        # we want only one instance of the cache so we use singleton
+        container.singleton(
+            ConfigExpiringCache,
+            lambda c: ConfigExpiringCache(
+                ttl_seconds=(
+                    int(os.environ["CONFIG_CACHE_TIMEOUT_SECONDS"])
+                    if os.environ.get("CONFIG_CACHE_TIMEOUT_SECONDS")
+                    else 60 * 60
+                )
+            ),
+        )
+        container.singleton(
+            McpToolsMetadataExpiringCache,
+            lambda c: McpToolsMetadataExpiringCache(
+                ttl_seconds=(
+                    int(os.environ["MCP_TOOLS_METADATA_CACHE_TIMEOUT_SECONDS"])
+                    if os.environ.get("MCP_TOOLS_METADATA_CACHE_TIMEOUT_SECONDS")
+                    else 60 * 60
+                ),
+                init_value={},
+            ),
+        )
+
+        container.singleton(
+            TokenVerifier,
+            lambda c: TokenVerifier(
+                jwks_uri=c.resolve(EnvironmentVariables).auth_jwks_uri,
+                issuer=c.resolve(EnvironmentVariables).auth_issuer,
+                audience=c.resolve(EnvironmentVariables).auth_audience,
+                algorithms=c.resolve(EnvironmentVariables).auth_algorithms,
+                well_known_uri=c.resolve(EnvironmentVariables).auth_well_known_uri,
+            ),
+        )
+
         container.register(HttpClientFactory, lambda c: HttpClientFactory())
 
         container.register(
@@ -121,6 +168,21 @@ class ContainerFactory:
         )
 
         container.register(
+            ConfluenceHelper,
+            lambda c: ConfluenceHelper(
+                http_client_factory=c.resolve(HttpClientFactory),
+                confluence_base_url=c.resolve(EnvironmentVariables).jira_base_url,
+                access_token=c.resolve(EnvironmentVariables).jira_token,
+                username=c.resolve(EnvironmentVariables).jira_username,
+            ),
+        )
+
+        container.register(
+            DatabricksHelper,
+            lambda c: DatabricksHelper(),
+        )
+
+        container.register(
             ToolProvider,
             lambda c: ToolProvider(
                 image_generator_factory=c.resolve(ImageGeneratorFactory),
@@ -129,30 +191,31 @@ class ContainerFactory:
                 environment_variables=c.resolve(EnvironmentVariables),
                 github_pull_request_helper=c.resolve(GithubPullRequestHelper),
                 jira_issues_helper=c.resolve(JiraIssueHelper),
+                confluence_helper=c.resolve(ConfluenceHelper),
+                databricks_helper=c.resolve(DatabricksHelper),
             ),
         )
+
+        container.register(
+            MCPToolProvider,
+            lambda c: MCPToolProvider(
+                cache=c.resolve(McpToolsMetadataExpiringCache),
+            ),
+        )
+
         container.register(
             LangChainCompletionsProvider,
             lambda c: LangChainCompletionsProvider(
                 model_factory=c.resolve(ModelFactory),
                 lang_graph_to_open_ai_converter=c.resolve(LangGraphToOpenAIConverter),
                 tool_provider=c.resolve(ToolProvider),
-            ),
-        )
-        # we want only one instance of the cache so we use singleton
-        container.singleton(
-            ExpiringCache,
-            ExpiringCache(
-                ttl_seconds=(
-                    int(os.environ["CONFIG_CACHE_TIMEOUT_SECONDS"])
-                    if os.environ.get("CONFIG_CACHE_TIMEOUT_SECONDS")
-                    else 60 * 60
-                )
+                mcp_tool_provider=c.resolve(MCPToolProvider),
+                token_verifier=c.resolve(TokenVerifier),
             ),
         )
 
         container.register(
-            ConfigReader, lambda c: ConfigReader(cache=c.resolve(ExpiringCache))
+            ConfigReader, lambda c: ConfigReader(cache=c.resolve(ConfigExpiringCache))
         )
         container.register(
             ChatCompletionManager,

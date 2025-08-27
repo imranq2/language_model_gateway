@@ -25,9 +25,9 @@ def convert_message_content_to_string(content: str | list[str | Dict[str, Any]])
             if content_item_type == "text":
                 text.append(content_item.get("text") or "")
         else:
-            assert (
-                False
-            ), f"Unsupported content item type: {type(content_item)}: {content_item}"
+            assert False, (
+                f"Unsupported content item type: {type(content_item)}: {content_item}"
+            )
     return "".join(text)
 
 
@@ -35,13 +35,13 @@ def langchain_to_chat_message(message: BaseMessage) -> Optional[ChatCompletionMe
     """Create a ChatMessage from a LangChain message."""
     match message:
         case SystemMessage():
-            assert (
-                False
-            ), "System messages should not be converted to ChatCompletionMessage"
+            assert False, (
+                "System messages should not be converted to ChatCompletionMessage"
+            )
         case HumanMessage():
-            assert (
-                False
-            ), "Human messages should not be converted to ChatCompletionMessage"
+            assert False, (
+                "Human messages should not be converted to ChatCompletionMessage"
+            )
         case AIMessage():
             ai_message = ChatCompletionMessage(
                 role="assistant",
@@ -62,16 +62,16 @@ def langchain_to_chat_message(message: BaseMessage) -> Optional[ChatCompletionMe
                 )
                 return ai_message
         case LangchainChatMessage():
-            assert (
-                False
-            ), "Chat messages should not be converted to ChatCompletionMessage"
+            assert False, (
+                "Chat messages should not be converted to ChatCompletionMessage"
+            )
         case _:
             raise ValueError(f"Unsupported message type: {message.__class__.__name__}")
     return None
 
 
 def remove_tool_calls(
-    content: str | list[str | dict[str, Any]]
+    content: str | list[str | dict[str, Any]],
 ) -> str | list[str | dict[str, Any]]:
     """Remove tool calls from content."""
     if isinstance(content, str):
