@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional
 
 import httpx
 from openai import AsyncOpenAI
@@ -9,13 +9,15 @@ from language_model_gateway.configs.config_schema import (
     ModelConfig,
     AgentConfig,
 )
+from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
+    ConfigExpiringCache,
+)
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
 from language_model_gateway.gateway.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
-from language_model_gateway.gateway.utilities.expiring_cache import ExpiringCache
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
 
@@ -35,8 +37,8 @@ async def test_chat_open_ai(async_client: httpx.AsyncClient) -> None:
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [
@@ -104,8 +106,8 @@ async def test_chat_completions_with_chat_history(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [

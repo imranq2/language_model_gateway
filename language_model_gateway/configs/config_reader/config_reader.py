@@ -15,33 +15,38 @@ from language_model_gateway.configs.config_reader.github_config_zip_reader impor
 )
 from language_model_gateway.configs.config_reader.s3_config_reader import S3ConfigReader
 from language_model_gateway.configs.config_schema import ChatModelConfig
-from language_model_gateway.gateway.utilities.expiring_cache import ExpiringCache
+from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
+    ConfigExpiringCache,
+)
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 from language_model_gateway.gateway.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
 
 class ConfigReader:
     _identifier: UUID = uuid4()
     _lock: asyncio.Lock = asyncio.Lock()
 
-    def __init__(self, *, cache: ExpiringCache[List[ChatModelConfig]]) -> None:
+    def __init__(self, *, cache: ConfigExpiringCache) -> None:
         """
         Initialize the async config reader
 
         Args:
             cache: Expiring cache for model configurations
         """
-        assert cache is not None
-        self._cache: ExpiringCache[List[ChatModelConfig]] = cache
-        assert self._cache is not None
+        if cache is None:
+            raise ValueError("cache must not be None")
+        self._cache: ConfigExpiringCache = cache
+        if self._cache is None:
+            raise ValueError("self._cache must not be None")
 
     # noinspection PyMethodMayBeStatic
     async def read_model_configs_async(self) -> List[ChatModelConfig]:
         config_path: str = os.environ["MODELS_OFFICIAL_PATH"]
-        assert (
-            config_path is not None
-        ), "MODELS_OFFICIAL_PATH environment variable is not set"
+        if config_path is None:
+            raise ValueError("MODELS_OFFICIAL_PATH environment variable is not set")
         models_zip_path: Optional[str] = os.environ.get("MODELS_ZIP_PATH", "")
 
         # Check cache first
@@ -83,9 +88,9 @@ class ConfigReader:
                     models = await self.read_models_from_path_async(config_path)
                     config_testing_path = os.environ.get("MODELS_TESTING_PATH")
                     if config_testing_path:
-                        models_testing: List[ChatModelConfig] = (
-                            await self.read_models_from_path_async(config_testing_path)
-                        )
+                        models_testing: List[
+                            ChatModelConfig
+                        ] = await self.read_models_from_path_async(config_testing_path)
                         if models_testing and len(models_testing) > 0:
                             models.append(
                                 ChatModelConfig(

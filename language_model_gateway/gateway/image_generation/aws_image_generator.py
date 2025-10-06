@@ -6,30 +6,35 @@ import os
 from concurrent.futures.thread import ThreadPoolExecutor
 from typing import override, Dict, Any, Literal
 
-import boto3
+from types_boto3_bedrock_runtime.client import BedrockRuntimeClient
+from types_boto3_bedrock_runtime.type_defs import InvokeModelResponseTypeDef
 
 from language_model_gateway.gateway.aws.aws_client_factory import AwsClientFactory
 from language_model_gateway.gateway.image_generation.image_generator import (
     ImageGenerator,
 )
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["IMAGE_GENERATION"])
 
 
 class AwsImageGenerator(ImageGenerator):
     def __init__(self, *, aws_client_factory: AwsClientFactory) -> None:
         self.executor: ThreadPoolExecutor = ThreadPoolExecutor()
         self.aws_client_factory: AwsClientFactory = aws_client_factory
-        assert self.aws_client_factory is not None
-        assert isinstance(self.aws_client_factory, AwsClientFactory)
+        if self.aws_client_factory is None:
+            raise ValueError("aws_client_factory must not be None")
+        if not isinstance(self.aws_client_factory, AwsClientFactory):
+            raise TypeError(
+                "aws_client_factory must be an instance of AwsClientFactory"
+            )
 
-    def _invoke_model(self, request_body: Dict[str, Any]) -> Dict[str, Any]:
+    def _invoke_model(self, request_body: Dict[str, Any]) -> InvokeModelResponseTypeDef:
         """Synchronous model invocation"""
 
-        client: boto3.client = self.aws_client_factory.create_client(
-            service_name="bedrock-runtime"
-        )
-        response: Dict[str, Any] = client.invoke_model(
+        client: BedrockRuntimeClient = self.aws_client_factory.create_bedrock_client()
+        response: InvokeModelResponseTypeDef = client.invoke_model(
             modelId="amazon.titan-image-generator-v2:0",
             body=json.dumps(request_body),
         )
@@ -67,7 +72,7 @@ class AwsImageGenerator(ImageGenerator):
             loop = asyncio.get_running_loop()
 
             # Run model invocation in executor
-            response = await loop.run_in_executor(
+            response: InvokeModelResponseTypeDef = await loop.run_in_executor(
                 self.executor, self._invoke_model, request_body
             )
 

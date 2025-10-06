@@ -11,9 +11,11 @@ from language_model_gateway.gateway.file_managers.file_manager_factory import (
     FileManagerFactory,
 )
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 from language_model_gateway.gateway.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 class GraphVizDiagramGeneratorToolInput(BaseModel):
@@ -85,9 +87,10 @@ class GraphVizDiagramGeneratorTool(ResilientBaseTool):
 
             # Render the diagram
             image_generation_path_ = os.environ["IMAGE_GENERATION_PATH"]
-            assert (
-                image_generation_path_
-            ), "IMAGE_GENERATION_PATH environment variable is not set"
+            if not image_generation_path_:
+                raise ValueError(
+                    "IMAGE_GENERATION_PATH environment variable is not set"
+                )
             image_file_name: str = f"{uuid4()}.png"
 
             # dot.render(output_file, cleanup=True)

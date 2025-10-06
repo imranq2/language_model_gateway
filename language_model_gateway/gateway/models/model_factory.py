@@ -11,15 +11,21 @@ from language_model_gateway.configs.config_schema import (
     ModelParameterConfig,
     ChatModelConfig,
 )
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["LLM"])
 
 
 class ModelFactory:
     # noinspection PyMethodMayBeStatic
     def get_model(self, chat_model_config: ChatModelConfig) -> BaseChatModel:
-        assert chat_model_config is not None
-        assert isinstance(chat_model_config, ChatModelConfig)
+        if chat_model_config is None:
+            raise ValueError("chat_model_config must not be None")
+        if not isinstance(chat_model_config, ChatModelConfig):
+            raise TypeError(
+                f"chat_model_config must be ChatModelConfig, got {type(chat_model_config)}"
+            )
         model_config: ModelConfig | None = chat_model_config.model
         if model_config is None:
             # if no model configuration is provided, use the default model

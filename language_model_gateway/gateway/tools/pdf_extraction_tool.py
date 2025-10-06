@@ -12,8 +12,10 @@ from pypdf import PageObject
 from language_model_gateway.gateway.ocr.ocr_extractor import OCRExtractor
 from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtractorFactory
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["IMAGE_PROCESSING"])
 
 
 class PDFExtractionToolInput(BaseModel):
@@ -35,6 +37,10 @@ class PDFExtractionToolInput(BaseModel):
     use_ocr: Optional[bool] = Field(
         default=False,
         description="Use OCR (Optical Character Recognition) if text extraction fails",
+    )
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
     )
 
 
@@ -61,6 +67,7 @@ class PDFExtractionTool(ResilientBaseTool):
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,
         use_ocr: bool = False,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Synchronous version of the tool (falls back to async implementation).
@@ -79,6 +86,7 @@ class PDFExtractionTool(ResilientBaseTool):
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,
         use_ocr: bool = False,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Asynchronous version of the tool with OCR support.
@@ -89,6 +97,7 @@ class PDFExtractionTool(ResilientBaseTool):
             start_page (Optional[int]): Starting page for extraction
             end_page (Optional[int]): Ending page for extraction
             use_ocr (bool): Use AWS Textract for OCR if text extraction fails
+            use_verbose_logging (Optional[bool]): Whether to enable verbose logging
 
         Returns:
             Tuple of extracted text and artifact description
@@ -98,7 +107,8 @@ class PDFExtractionTool(ResilientBaseTool):
         else:
             logger.info("Extracting text from base64 encoded PDF")
 
-        assert base64_pdf or url, "Either base64_pdf or url must be provided"
+        if not (base64_pdf or url):
+            raise ValueError("Either base64_pdf or url must be provided")
 
         pdf_bytes: bytes
         if not base64_pdf and url:
@@ -124,7 +134,8 @@ class PDFExtractionTool(ResilientBaseTool):
                     f"PDFExtractionAgent: Failed to fetch or process the URL: <{url}> ",
                 )
         else:
-            assert base64_pdf is not None, "base64_pdf must be provided"
+            if base64_pdf is None:
+                raise ValueError("base64_pdf must be provided")
             pdf_bytes = base64.b64decode(base64_pdf)
 
         try:
@@ -152,6 +163,8 @@ class PDFExtractionTool(ResilientBaseTool):
                 f"PDFExtractionAgent: Extracted text from pages {start} to {end} "
                 f"(Total pages: {total_pages}, OCR: {'Yes' if use_ocr else 'No'})"
             )
+            if use_verbose_logging:
+                artifact += f"\n===== Extracted text =====\n```{full_text}```\n====== End of Text ======"
 
             return full_text.strip(), artifact
 

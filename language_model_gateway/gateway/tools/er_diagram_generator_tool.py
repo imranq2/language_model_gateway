@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from typing import Type, Literal, Tuple, Optional, List, Dict, Union, Any
 from uuid import uuid4
 
@@ -11,9 +12,11 @@ from language_model_gateway.gateway.file_managers.file_manager_factory import (
     FileManagerFactory,
 )
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 from language_model_gateway.gateway.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 class ERDiagramInput(BaseModel):
@@ -143,7 +146,9 @@ class ERDiagramGeneratorTool(ResilientBaseTool):
                     for attr in attributes:
                         attr_name = attr["name"]  # type: ignore[index]
                         # Mark primary key with *
-                        attr_display = f"{'*' if attr.get('primary', False) else ''}{attr_name}"  # type: ignore[union-attr]
+                        attr_display = (
+                            f"{'*' if attr.get('primary', False) else ''}{attr_name}"  # type: ignore[union-attr]
+                        )
                         attribute_lines.append(attr_display)
 
                     # Combine attributes into label
@@ -183,7 +188,9 @@ class ERDiagramGeneratorTool(ResilientBaseTool):
             image_file_name: str = f"{uuid4()}.png"
 
             # Use file manager to save the file (if needed)
-            image_generation_path_ = os.environ.get("IMAGE_GENERATION_PATH", "/tmp")
+            image_generation_path_ = os.environ.get(
+                "IMAGE_GENERATION_PATH", tempfile.gettempdir()
+            )
             file_manager: FileManager = self.file_manager_factory.get_file_manager(
                 folder=image_generation_path_
             )
@@ -210,9 +217,7 @@ class ERDiagramGeneratorTool(ResilientBaseTool):
                     "ERDiagramGeneratorTool: Failed to save image to disk",
                 )
 
-            artifact: str = (
-                f"ERDiagramGeneratorTool: Generated ER diagram with {len(entities)} entities <{url}> "
-            )
+            artifact: str = f"ERDiagramGeneratorTool: Generated ER diagram with {len(entities)} entities <{url}> "
             # Return the image bytes and a description
             return url, artifact
 

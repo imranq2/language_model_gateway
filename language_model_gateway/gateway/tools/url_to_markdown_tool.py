@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Type, Literal, Tuple
+from typing import Type, Literal, Tuple, Optional
 
 import httpx
 from httpx import Headers
@@ -10,13 +10,18 @@ from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBa
 from language_model_gateway.gateway.utilities.html_to_markdown_converter import (
     HtmlToMarkdownConverter,
 )
-
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 class URLToMarkdownToolInput(BaseModel):
     url: str = Field(description="url of the webpage to scrape")
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class URLToMarkdownTool(ResilientBaseTool):
@@ -32,7 +37,9 @@ class URLToMarkdownTool(ResilientBaseTool):
     args_schema: Type[BaseModel] = URLToMarkdownToolInput
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
 
-    def _run(self, url: str) -> Tuple[str, str]:
+    def _run(
+        self, url: str, use_verbose_logging: Optional[bool] = None
+    ) -> Tuple[str, str]:
         """
         Synchronous version of the tool (falls back to async implementation).
         :param url: The URL of the webpage to fetch.
@@ -40,7 +47,9 @@ class URLToMarkdownTool(ResilientBaseTool):
         """
         raise NotImplementedError("Use async version of this tool")
 
-    async def _arun(self, url: str) -> Tuple[str, str]:
+    async def _arun(
+        self, url: str, use_verbose_logging: Optional[bool] = None
+    ) -> Tuple[str, str]:
         """
         Asynchronous version of the tool.
         :param url: The URL of the webpage to fetch.
@@ -69,7 +78,10 @@ class URLToMarkdownTool(ResilientBaseTool):
                 logger.info(
                     f"====== Scraped {url} ======\n{content}\n====== End of Scraped Markdown ======"
                 )
-            return content, f"URLToMarkdownAgent: Scraped content from <{url}> "
+            artifact: str = f"URLToMarkdownAgent: Scraped content from <{url}> "
+            if use_verbose_logging:
+                logger.info(f"\n```\n{content}\n```")
+            return content, artifact
         except Exception as e:
             return (
                 f"Failed to fetch or process the URL {url}: {str(e)}",

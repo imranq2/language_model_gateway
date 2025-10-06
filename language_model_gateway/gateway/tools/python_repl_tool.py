@@ -6,8 +6,10 @@ from langchain_experimental.utilities import PythonREPL
 from pydantic import BaseModel, Field
 
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 class PythonReplToolInput(BaseModel):
@@ -16,9 +18,7 @@ class PythonReplToolInput(BaseModel):
 
 class PythonReplTool(ResilientBaseTool):
     name: str = "python_repl"
-    description: str = (
-        "A Python shell. Use this to execute python commands. Input should be a valid python command. If you want to see the output of a value, you should print it out with `print(...)`."
-    )
+    description: str = "A Python shell. Use this to execute python commands. Input should be a valid python command. If you want to see the output of a value, you should print it out with `print(...)`."
     args_schema: Type[BaseModel] = PythonReplToolInput
 
     async def _arun(self, query: str) -> str:

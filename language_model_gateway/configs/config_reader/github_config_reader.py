@@ -9,8 +9,10 @@ from typing import List, Tuple, Optional, Any, Dict
 from urllib.parse import urlparse, unquote
 
 from language_model_gateway.configs.config_schema import ChatModelConfig
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
 
 class GitHubConfigReader:
@@ -154,9 +156,12 @@ class GitHubConfigReader:
             branch: The branch to read from
             github_token: Optional GitHub token for private repositories
         """
-        assert repo_url
-        assert path
-        assert branch
+        if not repo_url:
+            raise ValueError("repo_url must not be empty or None")
+        if not path:
+            raise ValueError("path must not be empty or None")
+        if not branch:
+            raise ValueError("branch must not be empty or None")
 
         logger.info(f"Reading model configurations from GitHub: {repo_url}/{path}")
         configs: List[ChatModelConfig] = []
@@ -167,9 +172,10 @@ class GitHubConfigReader:
                 api_url = f"https://api.github.com/repos/{repo_url}/contents/{path}?ref={branch}"
 
                 headers = (
-                    {"Authorization": f"token {github_token}"} if github_token else {}
+                    {"Authorization": f"Bearer {github_token}"} if github_token else {}
                 )
                 headers["Accept"] = "application/vnd.github.v3+json"
+                headers["X-GitHub-Api-Version"] = "2022-11-28"
 
                 # Get the list of files with rate limit handling
                 response = await self._make_request(
@@ -187,7 +193,7 @@ class GitHubConfigReader:
                 ]
 
                 async def fetch_and_parse_config(
-                    item: Dict[str, Any]
+                    item: Dict[str, Any],
                 ) -> Optional[ChatModelConfig]:
                     try:
                         raw_url = item["download_url"]

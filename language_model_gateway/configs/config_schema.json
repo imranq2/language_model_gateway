@@ -198,6 +198,10 @@
               {
                 "enum": [
                   "current_date",
+                  "calculator_stddev",
+                  "calculator_average",
+                  "calculator_length",
+                  "calculator_sum",
                   "pubmed",
                   "web_search",
                   "get_web_page",
@@ -214,7 +218,9 @@
                   "pdf_text_extractor ",
                   "github_pull_request_analyzer",
                   "github_pull_request_diff",
-                  "jira_issues_analyzer"
+                  "jira_issues_analyzer",
+                  "health_summary_generator",
+                  "fhir_graphql_schema_provider"
                 ]
               },
               {
@@ -223,8 +229,8 @@
             ]
           },
           "parameters": {
-            "type": "array",
-            "description": "Parameters for the tool.",
+            "type": ["array", "null"],
+            "description": "The parameters for the tool",
             "items": {
               "type": "object",
               "required": [
@@ -241,7 +247,31 @@
                   "description": "Parameter value."
                 }
               }
-            }
+            },
+            "default": null
+          },
+          "url": {
+            "type": ["string", "null"],
+            "description": "The MCP (Model Context Protocol) URL to access the tool",
+            "default": null
+          },
+          "headers": {
+            "type": ["object", "null"],
+            "description": "The headers to pass to the MCP tool",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": null
+          },
+          "auth": {
+            "type": ["string", "null"],
+            "description": "The authentication method to use when calling the tool",
+            "enum": [
+              "None",
+              "jwt_token",
+              "oauth"
+            ],
+            "default": null
           }
         }
       }
@@ -262,6 +292,10 @@
               {
                 "enum": [
                   "current_date",
+                  "calculator_stddev",
+                  "calculator_average",
+                  "calculator_length",
+                  "calculator_sum",
                   "pubmed",
                   "web_search",
                   "get_web_page",
@@ -278,7 +312,9 @@
                   "pdf_text_extractor ",
                   "github_pull_request_analyzer",
                   "github_pull_request_diff",
-                  "jira_issues_analyzer"
+                  "jira_issues_analyzer",
+                  "health_summary_generator",
+                  "fhir_graphql_schema_provider"
                 ]
               },
               {

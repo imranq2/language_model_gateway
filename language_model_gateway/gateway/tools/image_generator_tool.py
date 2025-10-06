@@ -4,7 +4,7 @@ import os
 from typing import Literal, Tuple, Type, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import Field, BaseModel
 
 from language_model_gateway.gateway.file_managers.file_manager import FileManager
 from language_model_gateway.gateway.file_managers.file_manager_factory import (
@@ -17,9 +17,11 @@ from language_model_gateway.gateway.image_generation.image_generator_factory imp
     ImageGeneratorFactory,
 )
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 from language_model_gateway.gateway.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["IMAGE_GENERATION"])
 
 
 class ImageGeneratorToolInput(BaseModel):
@@ -73,10 +75,11 @@ class ImageGeneratorTool(ResilientBaseTool):
                 prompt=prompt, style=self.style, image_size=self.image_size
             )
             # base64_image: str = base64.b64encode(image_data).decode("utf-8")
-            image_generation_path_ = os.environ["IMAGE_GENERATION_PATH"]
-            assert (
-                image_generation_path_
-            ), "IMAGE_GENERATION_PATH environment variable is not set"
+            image_generation_path_ = os.environ.get("IMAGE_GENERATION_PATH")
+            if not image_generation_path_:
+                raise ValueError(
+                    "IMAGE_GENERATION_PATH environment variable is not set"
+                )
             image_file_name: str = f"{uuid4()}.png"
             file_manager: FileManager = self.file_manager_factory.get_file_manager(
                 folder=image_generation_path_
@@ -108,13 +111,12 @@ class ImageGeneratorTool(ResilientBaseTool):
                     f"ImageGeneratorAgent[{self.model_provider}]: Generated image from prompt: {prompt}: {markdown_image} ",
                 )
             else:
-                return (
-                    url,
-                    f"ImageGeneratorAgent[{self.model_provider}]: Generated image from prompt: {prompt}: <{url}> ",
-                )
+                markdown_image = f"![Generated Image]({url})"
+                artifact: str = f"ImageGeneratorAgent[{self.model_provider}]: Generated image from prompt: {prompt}: <{url}> "
+                artifact += f"\n\n{markdown_image}"
+                return url, artifact
         except Exception as e:
-            logger.error(f"Failed to generate image: {str(e)}")
-            logger.exception(e, stack_info=True)
+            logger.exception(f"Failed to generate image: {str(e)}")
             return (
                 f"Failed to generate image: {e}",
                 f"ImageGeneratorAgent[{self.model_provider}]: Failed to generate image from prompt: {prompt}",

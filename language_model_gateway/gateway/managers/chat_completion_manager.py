@@ -19,6 +19,16 @@ from starlette.responses import StreamingResponse, JSONResponse
 
 from language_model_gateway.configs.config_reader.config_reader import ConfigReader
 from language_model_gateway.configs.config_schema import ChatModelConfig, PromptConfig
+from language_model_gateway.gateway.auth.exceptions.authorization_needed_exception import (
+    AuthorizationNeededException,
+)
+from language_model_gateway.gateway.auth.models.auth import AuthInformation
+from language_model_gateway.gateway.mcp.mcp_authorization_helper import (
+    McpAuthorizationHelper,
+)
+from language_model_gateway.gateway.mcp.exceptions.mcp_tool_unauthorized_exception import (
+    McpToolUnauthorizedException,
+)
 from language_model_gateway.gateway.providers.base_chat_completions_provider import (
     BaseChatCompletionsProvider,
 )
@@ -31,7 +41,11 @@ from language_model_gateway.gateway.providers.openai_chat_completions_provider i
 from language_model_gateway.gateway.schema.openai.completions import ChatRequest
 from openai.types.chat.chat_completion_chunk import ChoiceDelta, Choice as ChunkChoice
 
+from language_model_gateway.gateway.utilities.exception_logger import ExceptionLogger
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
+
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["LLM"])
 
 
 class ChatCompletionManager:
@@ -39,8 +53,6 @@ class ChatCompletionManager:
     Implements the chat completion manager following the OpenAI API
     https://platform.openai.com/docs/overview
     https://github.com/openai/openai-python/blob/main/api.md
-
-
     """
 
     def __init__(
@@ -50,23 +62,27 @@ class ChatCompletionManager:
         langchain_provider: LangChainCompletionsProvider,
         config_reader: ConfigReader,
     ) -> None:
-        """
-        Chat completion manager
-
-        :param open_ai_provider: provider to use for OpenAI completions
-        :param langchain_provider: provider to use for LangChain completions
-        :return:
-        """
-
         self.openai_provider: OpenAiChatCompletionsProvider = open_ai_provider
-        assert self.openai_provider is not None
-        assert isinstance(self.openai_provider, OpenAiChatCompletionsProvider)
+        if self.openai_provider is None:
+            raise ValueError("open_ai_provider must not be None")
+        if not isinstance(self.openai_provider, OpenAiChatCompletionsProvider):
+            raise TypeError(
+                f"open_ai_provider must be OpenAiChatCompletionsProvider, got {type(self.openai_provider)}"
+            )
         self.langchain_provider: LangChainCompletionsProvider = langchain_provider
-        assert self.langchain_provider is not None
-        assert isinstance(self.langchain_provider, LangChainCompletionsProvider)
+        if self.langchain_provider is None:
+            raise ValueError("langchain_provider must not be None")
+        if not isinstance(self.langchain_provider, LangChainCompletionsProvider):
+            raise TypeError(
+                f"langchain_provider must be LangChainCompletionsProvider, got {type(self.langchain_provider)}"
+            )
         self.config_reader: ConfigReader = config_reader
-        assert self.config_reader is not None
-        assert isinstance(self.config_reader, ConfigReader)
+        if self.config_reader is None:
+            raise ValueError("config_reader must not be None")
+        if not isinstance(self.config_reader, ConfigReader):
+            raise TypeError(
+                f"config_reader must be ConfigReader, got {type(self.config_reader)}"
+            )
 
     # noinspection PyMethodMayBeStatic
     async def chat_completions(
@@ -74,20 +90,24 @@ class ChatCompletionManager:
         *,
         headers: Dict[str, str],
         chat_request: ChatRequest,
+        auth_information: AuthInformation,
     ) -> StreamingResponse | JSONResponse:
         # Use the model to choose the provider
         try:
             model: str = chat_request["model"]
-            assert model is not None
+            if model is None:
+                raise ValueError("model must not be None in chat_request")
 
-            configs: List[ChatModelConfig] = (
-                await self.config_reader.read_model_configs_async()
-            )
+            configs: List[
+                ChatModelConfig
+            ] = await self.config_reader.read_model_configs_async()
 
             # Find the model config
-            model_config: ChatModelConfig | None = next(
-                (config for config in configs if config.name.lower() == model.lower()),
-                None,
+            configs = [
+                config for config in configs if config.name.lower() == model.lower()
+            ]
+            model_config: ChatModelConfig | None = (
+                configs[0] if len(configs) > 0 else None
             )
             if model_config is None:
                 logger.error(f"Model {model} not found in the config")
@@ -111,6 +131,11 @@ class ChatCompletionManager:
                         detail=f"Model type {model_config.type} not supported",
                     )
 
+            if provider is None:
+                raise RuntimeError(
+                    f"Provider should not be None for model type {model_config.type}"
+                )
+
             help_response: StreamingResponse | JSONResponse | None = (
                 self.handle_help_prompt(
                     chat_request=chat_request, model=model, model_config=model_config
@@ -124,14 +149,63 @@ class ChatCompletionManager:
                     f"Running chat completion for {chat_request} with headers {headers}"
                 )
             # Use the provider to get the completions
-            response: StreamingResponse | JSONResponse = (
-                await provider.chat_completions(
-                    model_config=model_config,
-                    headers=headers,
-                    chat_request=chat_request,
-                )
+            response: (
+                StreamingResponse | JSONResponse
+            ) = await provider.chat_completions(
+                model_config=model_config,
+                headers=headers,
+                chat_request=chat_request,
+                auth_information=auth_information,
             )
             return response
+        except AuthorizationNeededException as e:
+            return self.write_response(
+                chat_request=chat_request,
+                response_messages=[
+                    ChatCompletionMessage(role="assistant", content=line.strip())
+                    for line in e.message.splitlines()
+                    if line.strip()
+                ],
+            )
+        except ExceptionGroup as e:
+            # if there is just one exception, we can log it directly
+            if len(e.exceptions) == 1:
+                first_exception = e.exceptions[0]
+                if (
+                    isinstance(first_exception, McpToolUnauthorizedException)
+                    and first_exception.headers
+                ):
+                    url: str | None = (
+                        McpAuthorizationHelper.extract_resource_metadata_from_www_auth(
+                            headers=first_exception.headers
+                        )
+                    )
+                    content: str = f"Please login at {url} to access the MCP tool from {first_exception.url}."
+                    return self.write_response(
+                        chat_request=chat_request,
+                        response_messages=[
+                            ChatCompletionMessage(role="assistant", content=content)
+                        ],
+                    )
+                elif isinstance(first_exception, AuthorizationNeededException):
+                    return self.write_response(
+                        chat_request=chat_request,
+                        response_messages=[
+                            ChatCompletionMessage(
+                                role="assistant", content=line.strip()
+                            )
+                            for line in first_exception.message.splitlines()
+                            if line.strip()
+                        ],
+                    )
+                logger.error(
+                    f"ExceptionGroup in chat completion: {first_exception}",
+                    exc_info=True,
+                )
+                return await self.handle_exception(
+                    chat_request=chat_request, e=first_exception
+                )
+            return await self.handle_exception(chat_request=chat_request, e=e)
         except Exception as e:
             return await self.handle_exception(chat_request=chat_request, e=e)
 
@@ -241,7 +315,7 @@ class ChatCompletionManager:
         )
         if should_stream_response:
 
-            async def foo(
+            async def stream_response(
                 response_messages1: List[ChatCompletionMessage],
             ) -> AsyncGenerator[str, None]:
                 for response_message in response_messages1:
@@ -270,7 +344,7 @@ class ChatCompletionManager:
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
-                content=foo(response_messages1=response_messages),
+                content=stream_response(response_messages1=response_messages),
                 media_type="text/event-stream",
             )
         else:
@@ -298,8 +372,14 @@ class ChatCompletionManager:
     async def handle_exception(
         self, *, chat_request: ChatRequest, e: Exception
     ) -> StreamingResponse | JSONResponse:
-        logger.error(f"Error in chat completion: {e}")
+        logger.error(
+            f"Error in chat completion: {e} {type(e)} {e.__dict__.keys()}",
+            exc_info=True,
+        )
+        content = ExceptionLogger.extract_error_details(e)
         return self.write_response(
             chat_request=chat_request,
-            response_messages=[ChatCompletionMessage(role="assistant", content=str(e))],
+            response_messages=[
+                ChatCompletionMessage(role="assistant", content=content)
+            ],
         )

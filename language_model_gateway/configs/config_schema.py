@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Literal
 
 from pydantic import BaseModel
 
@@ -67,6 +67,29 @@ class AgentConfig(BaseModel):
 
     parameters: List[AgentParameterConfig] | None = None
     """The parameters for the tool"""
+
+    url: str | None = None
+    """The MCP (Model Context Protocol) URL to access the tool"""
+
+    headers: Dict[str, str] | None = None
+    """The headers to pass to the MCP tool"""
+
+    tools: str | None = None
+    """The names of the tool to use in the MCP call.  If none is provided then all tools at the URL will be used. Separate multiple tool names with commas."""
+
+    auth: Literal["None", "jwt_token", "oauth"] | None = None
+    """The authentication method to use when calling the tool"""
+
+    auth_providers: List[str] | None = None
+    """The auth providers for the authentication. If multiple are provided then the tool accepts ANY of those auth providers.  If auth is needed, we will use the first auth provider."""
+
+    issuers: List[str] | None = None
+    """
+    The issuers for the authentication.
+    If multiple are provided then the tool accepts ANY of those issuers.
+    If auth is needed, we will use the first issuer.
+    If none is provided then we use the default issuer from the OIDC provider.
+    """
 
 
 class ModelConfig(BaseModel):

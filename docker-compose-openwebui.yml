@@ -1,26 +1,35 @@
-version: '3.8'
-
+# pragma: allowlist secret
 services:
   open-webui:
     # https://github.com/open-webui/open-webui/releases
-    image: ghcr.io/open-webui/open-webui:v0.5.4
     depends_on:
       - open-webui-db
+    # https://github.com/open-webui/open-webui/pkgs/container/open-webui/versions
+    # Slim image excludes embedded AI models and Ollama installation
+    #    image: ghcr.io/open-webui/open-webui:v0.6.31-slim
+    build:
+      dockerfile: ./openwebui-config/functions/open-webui.Dockerfile
+      context: .
     env_file:
       - docker.env
     ports:
       - "3050:8080"
     environment:
-      # https://docs.openwebui.com/getting-started/advanced-topics/env-configuration
+      ENV: dev
+      # https://docs.openwebui.com/getting-started/env-configuration/
+      # Set to True to bypass model access control checks (useful for development)
       BYPASS_MODEL_ACCESS_CONTROL: True
+      # Set default user role to 'user' (other option is 'admin')
       DEFAULT_USER_ROLE: user
       WEBUI_AUTH: 0
       #      OPENAI_API_BASE_URL: 'https://api.openai.com/v1'
       GLOBAL_LOG_LEVEL: debug
-      SRC_LOG_LEVELS: '{"SOCKET": "DEBUG", "MAIN": "DEBUG", "MODELS": "DEBUG", "OPENAI": "DEBUG", "OAUTH": "DEBUG", "CONFIG": "DEBUG", "DB": "DEBUG"}'
+      SRC_LOG_LEVELS: '{"SOCKET": "DEBUG", "MAIN": "DEBUG", "MODELS": "DEBUG", "OPENAI": "DEBUG", "OAUTH": "DEBUG", "CONFIG": "DEBUG", "DB": "DEBUG", "RAG": "DEBUG", "TOOLS": "DEBUG", "AUDIO": "DEBUG"}'
       #      OPENAI_API_BASE_URL: 'http://dev:5000/api/v1'
       # Supports balanced OpenAI base API URLs, semicolon-separated.
-      OPENAI_API_BASE_URL: 'http://dev:5000/api/v1'
+      # disable OPENAI_API since we use a Pipeline to handle requests
+      #      ENABLE_OPENAI_API: 0
+      OPENAI_API_BASE_URL: 'http://language-model-gateway:5000/api/v1'
       CORS_ALLOW_ORIGIN: '*'
       OPENAI_API_KEY: 'bedrock'
       #      DEFAULT_MODELS: "General Purpose"
@@ -50,23 +59,85 @@ services:
       AUDIO_TTS_ENGINE: "openai"
       AUDIO_TTS_OPENAI_API_BASE_URL: "http://localhost:5050/api/v1"
       AUDIO_TTS_VOICE: "alloy"
-      SAFE_MODE: True
       ENABLE_WEBSOCKET_SUPPORT: True
-      # disable some unneeded stuff like RAG
-      RAG_EMBEDDING_MODEL: ""
       # curl --silent --fail http://localhost:8081/health | jq -ne 'input.status == true' || exit 1
-      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:-$(openssl rand -hex 32)}"
+      WEBUI_SECRET_KEY: "2700d293b8e65dca57c4904043af8ae09b5293338e83b7bd0d9f615e9971f3d6"
+      OAUTH_SESSION_TOKEN_ENCRYPTION_KEY: "ce6901571af605719757c58a8388f4ded7728b0c6dd849ed05b0a2c8159f92ad"
+      # Disables persistent config and reads from environment variables only
+      ENABLE_PERSISTENT_CONFIG: False
+      # enable initial admin user creation
+      ENABLE_INITIAL_ADMIN_SIGNUP: True
+      # Toggles email, password, sign-in and "or" (only when ENABLE_OAUTH_SIGNUP is set to True) elements.
+      ENABLE_LOGIN_FORM: False
+      # Enables account creation when signing up via OAuth
+      ENABLE_OAUTH_SIGNUP: True
+      # Controls whether OAuth-related settings are persisted in the database after the first launch.
+      ENABLE_OAUTH_PERSISTENT_CONFIG: False
+      # identify a user's unique ID (sub) from the OAuth/OIDC provider's user info response
+      OAUTH_SUB_CLAIM: "username"
+      # merges OAuth accounts with existing accounts using the same email address
+      OAUTH_MERGE_ACCOUNTS_BY_EMAIL: True
+      # Enables API key authentication.  Needed for our script in Makefile to set up configuration
+      ENABLE_API_KEY: True
+      # Use S3 for file storage: https://docs.openwebui.com/tutorials/s3-storage/
+      STORAGE_PROVIDER: s3
+      S3_ENDPOINT_URL: "https://s3.us-east-1.amazonaws.com"
+      S3_BUCKET_NAME: "bwell-dev-data-science-ue1"
+      S3_REGION_NAME: "us-east-1"
+      S3_KEY_PREFIX: "aiden/uploads/"
+      # Embeddings config
+      #      BYPASS_EMBEDDING_AND_RETRIEVAL: True
+      RAG_EMBEDDING_MODEL: "all-MiniLM-L6-v2"
+      # set up vector database
+      #      VECTOR_DB: "s3vector"
+      #      S3_VECTOR_BUCKET_NAME: "bwell-dev-data-science-vector-ue1"
+      #      S3_VECTOR_REGION: "us-east-1"
+      # Whether to write oauth cookie or not
+      # We now get it directly in the language_model_gateway.py so we don't need this
+      ENABLE_OAUTH_ID_TOKEN_COOKIE: False
+      # https://docs.openwebui.com/getting-started/env-configuration/#default_prompt_suggestions
+      DEFAULT_PROMPT_SUGGESTIONS: '[{
+        "title": [
+          "Do I need a vaccine?",
+          "search your vaccination history"
+        ],
+        "content": "Do I need a vaccine?"
+      },
+      {
+        "title": [
+          "What are my active medications?",
+          "See the medications I am taking"
+        ],
+        "content": "What are my active medications?"
+      },
+      {
+        "title": [
+          "When did I see a doctor?",
+          "search your past visits"
+        ],
+        "content": "When did I see a doctor?"
+      },
+      {
+        "title": [
+          "What insurance did I have in 2025?",
+          "search your past insurance plans"
+        ],
+        "content": "What insurance did I have in 2025?"
+      }]'
+    volumes:
+      # Mount AWS credentials if using S3 storage
+      - ~/.aws/:/root/.aws:ro-
     networks:
       - web
     healthcheck:
       test: [ "CMD-SHELL", "curl --silent --fail http://localhost:8080/health | jq -ne 'input.status == true' || exit 1" ]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       start_period: 10s
       retries: 20
 
   open-webui-db:
-    image: postgres:13
+    image: public.ecr.aws/docker/library/postgres:18.0-alpine3.22
     environment:
       - POSTGRES_DB=myapp_db
       - POSTGRES_USER=myapp_user

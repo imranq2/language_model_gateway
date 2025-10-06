@@ -7,8 +7,10 @@ import httpx
 from pydantic import BaseModel, Field
 
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 class ProviderSearchToolInput(BaseModel):
@@ -22,13 +24,15 @@ class ProviderSearchToolInput(BaseModel):
     insurance: Optional[List[str]] = Field(
         description="List of insurance plans to filter by"
     )
+    use_verbose_logging: Optional[bool] = Field(
+        default=False,
+        description="Whether to enable verbose logging",
+    )
 
 
 class ProviderSearchTool(ResilientBaseTool):
     name: str = "provider_search"
-    description: str = (
-        "Search for healthcare providers (e.g., doctors, clinics and hospitals) based on various criteria like name, specialty, location, insurance etc."
-    )
+    description: str = "Search for healthcare providers (e.g., doctors, clinics and hospitals) based on various criteria like name, specialty, location, insurance etc."
     args_schema: Type[BaseModel] = ProviderSearchToolInput
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
     api_url: Optional[str] = os.environ.get("PROVIDER_SEARCH_API_URL")
@@ -44,7 +48,7 @@ class ProviderSearchTool(ResilientBaseTool):
             ) {
               searchProviders(
                 searchProvidersInput: {
-                  client: [{ dataSets: NPPES }]
+                  client: [{ dataSets: [CONNECTHUB, NPPES] }]
                   search: $search
                   searchPosition: $searchPosition
                   specialty: $specialty
@@ -99,6 +103,17 @@ class ProviderSearchTool(ResilientBaseTool):
                   }
                   endpoint {
                     name
+                    address
+                    status
+                    identifier {
+                      system
+                      value
+                    }
+                    connectionType {
+                      code
+                      display
+                      system
+                    }
                   }
                 }
               }
@@ -115,7 +130,6 @@ class ProviderSearchTool(ResilientBaseTool):
         specialty: Optional[List[str]] = None,
         insurance: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-
         variables: Dict[
             str, str | float | int | Dict[str, Any] | List[Dict[str, Any]] | None
         ] = {
@@ -165,6 +179,7 @@ class ProviderSearchTool(ResilientBaseTool):
         distance: Optional[float] = None,
         specialty: Optional[List[str]] = None,
         insurance: Optional[List[str]] = None,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Synchronous execution"""
         raise NotImplementedError("Use async version of this tool")
@@ -177,10 +192,12 @@ class ProviderSearchTool(ResilientBaseTool):
         distance: Optional[float] = None,
         specialty: Optional[List[str]] = None,
         insurance: Optional[List[str]] = None,
+        use_verbose_logging: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Asynchronous execution"""
 
-        assert self.api_url, "API URL is required"
+        if not self.api_url:
+            raise ValueError("API URL is required")
 
         variables = self._prepare_variables(
             search=search,
@@ -202,10 +219,11 @@ class ProviderSearchTool(ResilientBaseTool):
 
         try:
             response = await async_client.post(self.api_url, json=payload, timeout=30.0)
-            return (
-                self._handle_response(response),
-                f"ProviderSearchAgent: Searched for {search} {variables} ",
-            )
+            artifact: str = f"ProviderSearchAgent: Searched for {search} {variables} "
+            if use_verbose_logging:
+                artifact += f"\nRequest: {payload}"
+                artifact += f"===== Response ======\n```{response.text}```\n====== End of Response ======"
+            return self._handle_response(response), artifact
 
         except httpx.TimeoutException:
             raise Exception("Request timed out")

@@ -4,9 +4,11 @@ import json
 from typing import List
 from botocore.exceptions import ClientError
 from language_model_gateway.configs.config_schema import ChatModelConfig
+from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 from language_model_gateway.gateway.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
 
 class S3ConfigReader:
@@ -20,9 +22,10 @@ class S3ConfigReader:
         bucket_name: str
         prefix: str
         bucket_name, prefix = UrlParser.parse_s3_uri(s3_url)
-
-        assert bucket_name
-        assert prefix
+        if not bucket_name:
+            raise ValueError("bucket_name must not be empty or None")
+        if not prefix:
+            raise ValueError("prefix must not be empty or None")
 
         logger.info(f"Reading model configurations from S3: {bucket_name}/{prefix}")
 

@@ -12,6 +12,9 @@ from language_model_gateway.configs.config_schema import (
     ModelConfig,
     AgentConfig,
 )
+from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
+    ConfigExpiringCache,
+)
 from language_model_gateway.container.simple_container import SimpleContainer
 from language_model_gateway.gateway.api_container import get_container_async
 from language_model_gateway.gateway.models.model_factory import ModelFactory
@@ -21,14 +24,13 @@ from language_model_gateway.gateway.utilities.environment_reader import (
 from language_model_gateway.gateway.utilities.environment_variables import (
     EnvironmentVariables,
 )
-from language_model_gateway.gateway.utilities.expiring_cache import ExpiringCache
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_environment_variables import MockEnvironmentVariables
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
 
 
 @pytest.mark.httpx_mock(
-    should_mock=lambda request: os.environ["RUN_TESTS_WITH_REAL_LLM"] != "1"
+    should_mock=lambda request: os.environ.get("RUN_TESTS_WITH_REAL_LLM") != "1"
 )
 async def test_github_pull_request_diff_tool(async_client: httpx.AsyncClient) -> None:
     print("")
@@ -49,8 +51,8 @@ async def test_github_pull_request_diff_tool(async_client: httpx.AsyncClient) ->
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [
@@ -109,7 +111,7 @@ async def test_github_pull_request_diff_tool(async_client: httpx.AsyncClient) ->
 
 
 @pytest.mark.httpx_mock(
-    should_mock=lambda request: os.environ["RUN_TESTS_WITH_REAL_LLM"] != "1"
+    should_mock=lambda request: os.environ.get("RUN_TESTS_WITH_REAL_LLM") != "1"
 )
 async def test_github_pull_request_diff_combined_tool(
     async_client: httpx.AsyncClient,
@@ -131,8 +133,8 @@ async def test_github_pull_request_diff_combined_tool(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ExpiringCache[List[ChatModelConfig]] = (
-        test_container.resolve(ExpiringCache)
+    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
+        ConfigExpiringCache
     )
     await model_configuration_cache.set(
         [

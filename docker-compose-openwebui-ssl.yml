@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   traefik:
-    image: traefik:v2.10
+    image: traefik:v3.5.3
+    # https://github.com/traefik/traefik/releases
     container_name: traefik
     command:
       - "--providers.docker=true"

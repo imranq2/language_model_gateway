@@ -1,9 +1,11 @@
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Generator
 
 import boto3
 import pytest
+from botocore.client import BaseClient
 from moto import mock_aws
 from starlette.responses import Response, StreamingResponse
+from boto3 import Session
 
 from language_model_gateway.gateway.aws.aws_client_factory import AwsClientFactory
 from language_model_gateway.gateway.file_managers.aws_s3_file_manager import (
@@ -11,17 +13,23 @@ from language_model_gateway.gateway.file_managers.aws_s3_file_manager import (
 )
 from language_model_gateway.gateway.utilities.s3_url import S3Url
 from tests.gateway.mocks.mock_aws_client_factory import MockAwsClientFactory
+from types_boto3_s3.client import S3Client
 
 
 @pytest.fixture
-def mock_s3() -> boto3.client:
+def mock_s3() -> Generator[S3Client, Any, None]:
     """Create a mock S3 client using moto."""
     with mock_aws():
-        yield boto3.client("s3", region_name="us-east-1")
+        session: Session = boto3.Session()
+        s3_client: S3Client = session.client(
+            service_name="s3",
+            region_name="us-east-1",
+        )
+        yield s3_client
 
 
 @pytest.fixture
-def aws_client_factory(mock_s3: boto3.client) -> AwsClientFactory:
+def aws_client_factory(mock_s3: BaseClient) -> AwsClientFactory:
     """Create a mock AWS client factory."""
     return MockAwsClientFactory(aws_client=mock_s3)
 
@@ -94,7 +102,7 @@ def test_get_bucket(aws_s3_file_manager: AwsS3FileManager) -> None:
 
 @pytest.mark.asyncio
 async def test_save_file_async_success(
-    aws_s3_file_manager: AwsS3FileManager, mock_s3: boto3.client
+    aws_s3_file_manager: AwsS3FileManager, mock_s3: S3Client
 ) -> None:
     """
     Comprehensive test for save_file_async method.
@@ -168,13 +176,13 @@ async def test_save_file_async_edge_cases(
     assert result is None
 
     # Test invalid folder (missing s3://)
-    with pytest.raises(AssertionError, match="folder should contain s3://"):
+    with pytest.raises(ValueError, match="folder should contain s3://"):
         await aws_s3_file_manager.save_file_async(
             file_data=b"test", folder="invalid-bucket", filename="test.jpg"
         )
 
     # Test invalid filename (contains s3://)
-    with pytest.raises(AssertionError, match="filename should not contain s3://"):
+    with pytest.raises(ValueError, match="filename should not contain s3://"):
         await aws_s3_file_manager.save_file_async(
             file_data=b"test", folder="s3://test-bucket", filename="s3://test.jpg"
         )
@@ -182,7 +190,7 @@ async def test_save_file_async_edge_cases(
 
 @pytest.mark.asyncio
 async def test_read_file_async_success(
-    aws_s3_file_manager: AwsS3FileManager, mock_s3: boto3.client
+    aws_s3_file_manager: AwsS3FileManager, mock_s3: S3Client
 ) -> None:
     """
     Comprehensive test for read_file_async method.
@@ -240,7 +248,7 @@ async def test_read_file_async_success(
 
 @pytest.mark.asyncio
 async def test_read_file_async_error_cases(
-    aws_s3_file_manager: AwsS3FileManager, mock_s3: boto3.client
+    aws_s3_file_manager: AwsS3FileManager, mock_s3: S3Client
 ) -> None:
     """
     Test error cases for read_file_async.
@@ -263,13 +271,37 @@ async def test_read_file_async_error_cases(
     assert b"File not found" in response.body
 
     # Test invalid folder input
-    with pytest.raises(AssertionError, match="folder should not contain s3://"):
+    with pytest.raises(ValueError, match="folder should not contain s3://"):
         await aws_s3_file_manager.read_file_async(
             folder="s3://test-bucket", file_path="test.jpg"
         )
 
     # Test invalid file path input
-    with pytest.raises(AssertionError, match="file_path should not contain s3://"):
+    with pytest.raises(ValueError, match="file_path should not contain s3://"):
         await aws_s3_file_manager.read_file_async(
             folder=bucket_name, file_path="s3://test.jpg"
         )
+
+
+class MyModel:
+    def __init__(self, name: str, value: Any) -> None:
+        self.name = name
+        self.value = value
+
+    def save(self) -> None:
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.put_object(Bucket="mybucket", Key=self.name, Body=self.value)
+
+
+@pytest.mark.asyncio
+async def test_mock_aws() -> None:
+    with mock_aws():
+        conn = boto3.resource("s3", region_name="us-east-1")
+        conn.create_bucket(Bucket="mybucket")
+
+        model_instance = MyModel("steve", "is awesome")
+        model_instance.save()
+
+        body = conn.Object("mybucket", "steve").get()["Body"].read().decode("utf-8")
+
+        assert body == "is awesome"

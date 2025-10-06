@@ -17,13 +17,14 @@ class ImageGenerationManager:
         self.image_generation_provider: BaseImageGenerationProvider = (
             image_generation_provider
         )
-        assert self.image_generation_provider is not None
+        if self.image_generation_provider is None:
+            raise ValueError("image_generation_provider must not be None")
 
     async def generate_image_async(
         self,
         *,
         image_generation_request: ImageGenerationRequest,
-        headers: Dict[str, str]
+        headers: Dict[str, str],
     ) -> StreamingResponse | JSONResponse:
         """
         Implements the image generation manager
@@ -34,15 +35,21 @@ class ImageGenerationManager:
         :param image_generation_request:
         :return:
         """
-        assert image_generation_request is not None
-        assert headers is not None
-        assert isinstance(headers, dict)
-        assert isinstance(image_generation_request, dict)
-
-        response: StreamingResponse | JSONResponse = (
-            await self.image_generation_provider.generate_image_async(
-                image_generation_request=image_generation_request, headers=headers
+        if image_generation_request is None:
+            raise ValueError("image_generation_request must not be None")
+        if headers is None:
+            raise ValueError("headers must not be None")
+        if not isinstance(headers, dict):
+            raise TypeError(f"headers must be dict, got {type(headers)}")
+        if not isinstance(image_generation_request, dict):
+            raise TypeError(
+                f"image_generation_request must be dict, got {type(image_generation_request)}"
             )
+
+        response: (
+            StreamingResponse | JSONResponse
+        ) = await self.image_generation_provider.generate_image_async(
+            image_generation_request=image_generation_request, headers=headers
         )
 
         return response
