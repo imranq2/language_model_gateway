@@ -7,7 +7,7 @@ on:
 
 env:
   IMAGE_NAME: language_model_gateway
-  REPOSITORY_URL: icanbwell
+  REPOSITORY_URL: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
   push:
@@ -15,15 +15,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-#      - name: AWS Credentials
-#        uses: aws-actions/configure-aws-credentials@v4
-#        with:
-#          aws-region: us-east-1
-#
-#      - name: Login to Amazon ECR
-#        id: login-ecr
-#        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
