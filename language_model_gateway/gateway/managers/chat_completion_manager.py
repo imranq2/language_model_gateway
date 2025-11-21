@@ -5,6 +5,9 @@ import time
 from typing import Dict, List, cast, AsyncGenerator, Optional
 
 from fastapi import HTTPException
+from oidcauthlib.auth.exceptions.authorization_needed_exception import (
+    AuthorizationNeededException,
+)
 from openai.types import CompletionUsage
 from openai.types.chat import (
     ChatCompletionSystemMessageParam,
@@ -19,10 +22,8 @@ from starlette.responses import StreamingResponse, JSONResponse
 
 from language_model_gateway.configs.config_reader.config_reader import ConfigReader
 from language_model_gateway.configs.config_schema import ChatModelConfig, PromptConfig
-from language_model_gateway.gateway.auth.exceptions.authorization_needed_exception import (
-    AuthorizationNeededException,
-)
-from language_model_gateway.gateway.auth.models.auth import AuthInformation
+
+from oidcauthlib.auth.models.auth import AuthInformation
 from language_model_gateway.gateway.mcp.mcp_authorization_helper import (
     McpAuthorizationHelper,
 )
@@ -119,7 +120,7 @@ class ChatCompletionManager:
                 chat_request=chat_request, system_prompts=model_config.system_prompts
             )
 
-            provider: BaseChatCompletionsProvider
+            provider: BaseChatCompletionsProvider | None = None
             match model_config.type:
                 case "openai":
                     provider = self.openai_provider

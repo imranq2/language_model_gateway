@@ -22,6 +22,7 @@ from mcp.types import (
     EmbeddedResource,
 )
 
+from oidcauthlib.auth.models.token import Token
 from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
     ConfigExpiringCache,
 )
@@ -44,8 +45,6 @@ from language_model_gateway.configs.config_schema import (
     ModelConfig,
     AgentConfig,
 )
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
 from language_model_gateway.gateway.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
@@ -53,6 +52,7 @@ from language_model_gateway.gateway.utilities.environment_reader import (
 from tests.auth.keycloak_helper import KeyCloakHelper
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from oidcauthlib.container.interfaces import IContainer
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +63,15 @@ logger = logging.getLogger(__name__)
 )
 async def test_google_drive_mcp_agent_directly() -> None:
     # HTTP server
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = KeyCloakHelper.get_keycloak_access_token(
         username="tester", password="password"
     )
-    access_token = access_token_result["access_token"]
+    assert access_token is not None
     logger.info(f"Access Token: {access_token}")
 
     url: str = "http://mcp_server_gateway:5000/google_drive/"
     transport: StreamableHttpTransport = StreamableHttpTransport(
-        url=url, auth=access_token
+        url=url, auth=access_token.token
     )
 
     async def log_handler(message: LogMessage) -> None:
@@ -132,11 +132,11 @@ async def test_google_drive_via_llm() -> None:
     verify_aws_boto3_authentication()
     # model: BaseChatModel = init_chat_model("openai:gpt-4.1")
     model_parameters_dict: Dict[str, Any] = {}
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = KeyCloakHelper.get_keycloak_access_token(
         username="tester", password="password"
     )
+    assert access_token is not None
     url: str = "http://mcp_server_gateway:5000/google_drive"
-    access_token = access_token_result["access_token"]
 
     model: BaseChatModel = ChatBedrockConverse(
         client=None,
@@ -155,7 +155,7 @@ async def test_google_drive_via_llm() -> None:
         # httpx_client_factory
         # and/or bearer "auth"# auth: NotRequired[httpx.Auth]
         "headers": {
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {access_token.token}",
             "Content-Type": "application/json",
         },
     }
@@ -232,18 +232,17 @@ def verify_aws_boto3_authentication() -> None:
     reason="Environment Variable RUN_TESTS_WITH_REAL_LLM not set",
 )
 async def test_chat_completions_with_google_drive(
-    async_client: httpx.AsyncClient,
+    async_client: httpx.AsyncClient, test_container: IContainer
 ) -> None:
     print("")
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = KeyCloakHelper.get_keycloak_access_token(
         username="tester", password="password"
     )
+    assert access_token is not None
     url: str = "http://mcp_server_gateway:5000/google_drive"
-    access_token = access_token_result["access_token"]
 
-    test_container: SimpleContainer = await get_container_async()
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
@@ -294,7 +293,7 @@ async def test_chat_completions_with_google_drive(
         messages=[message],
         model="Google Drive",
         extra_headers={
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {access_token.token}",
         },
     )
 

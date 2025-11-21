@@ -1,12 +1,13 @@
 import logging
 import typing
-from typing import Type, Dict, Any, Annotated, Literal
+from typing import Type, Dict, Any, Annotated, Literal, override
 
 from langchain_core.tools import ToolException
 from langgraph.config import get_store
 from langgraph.prebuilt import InjectedState
 from langgraph.store.base import BaseStore
 from langmem import errors
+from langmem.utils import NamespaceTemplate
 from pydantic import BaseModel, Field, ConfigDict
 
 from language_model_gateway.gateway.converters.my_messages_state import MyMessagesState
@@ -36,25 +37,26 @@ class UserProfileInput(BaseModel):
 
 class StoreUserProfileTool(ResilientBaseTool):
     """
-    Tool for managing persistent memories in conversations. Supports create, update, and delete actions.
+    Tool for managing persistent user profiles in conversations. Supports create, update, and delete actions.
     """
 
     name: str = "store_user_profile"
     description: str = (
-        "Create, update, or delete a user profile to persist across conversations. "
+        "Update the existing user profile (or create a new one if it doesn't exist) based on the shared information. Create one entry per user. "
         "Proactively call this tool when you: "
         "1. Identify a new USER profile. "
         "2. Receive an explicit USER request to remember something or otherwise alter your behavior. "
-        "3. Are working and want to record important context. "
+        "3. Are working and want to record important memory. "
         "4. Identify that an existing USER profile is incorrect or outdated."
     )
     args_schema: Type[BaseModel] = UserProfileInput
-    namespace: tuple[str, ...] | str
+    namespace: tuple[str, ...] | str = ("memories", "{user_id}", "user_profile")
     actions_permitted: typing.Optional[
         tuple[typing.Literal["create", "update", "delete"], ...]
     ] = ("create", "update", "delete")
     store: typing.Optional[BaseStore] = None
 
+    @override
     def _run(
         self,
         name: str,
@@ -67,6 +69,7 @@ class StoreUserProfileTool(ResilientBaseTool):
             "Synchronous execution is not supported. Use the asynchronous method instead."
         )
 
+    @override
     async def _arun(
         self,
         *,
@@ -77,23 +80,26 @@ class StoreUserProfileTool(ResilientBaseTool):
         logger.info(
             f"StoreUserProfileTool called with action: {action} state: {state} user_profile: {user_profile.model_dump()}"
         )
-        # Validate state and action
-        UserProfileValidator.validate_state_user_id(state)
-        UserProfileValidator.validate_action(action, self.actions_permitted)
-        # use the user_id from the state since it is more reliable than the one the llm sets in the user_profile
-        if not state.user_id:
-            raise ToolException(
-                "user_id is required in the state to store user profile"
-            )
-        user_profile.user_id = state.user_id
-        store = self._get_store()
-        repo = UserProfileRepository(store, self.namespace)
         try:
+            # Validate state and action
+            UserProfileValidator.validate_state_user_id(state)
+            UserProfileValidator.validate_action(action, self.actions_permitted)
+            # use the user_id from the state since it is more reliable than the one the llm sets in the user_profile
+            if not state.user_id:
+                raise ToolException(
+                    "user_id is required in the state to store user profile"
+                )
+            user_profile.user_id = state.user_id
+            store = self._get_store()
+            namespacer = NamespaceTemplate(self.namespace)
+            namespace = namespacer()
+            repo = UserProfileRepository(store, namespace)
             if action == "delete":
                 await repo.delete(user_profile.user_id)
                 return f"Deleted user profile user_profile_{user_profile.user_id}"
-            await repo.save(user_profile)
-            return f"{action}d memory user_profile_{user_profile.user_id}"
+            else:
+                await repo.save(user_profile)
+                return f"{action}d user profile user_profile_{user_profile.user_id}"
         except Exception as e:
             logger.exception("Error storing user profile")
             raise ToolException("Error storing user profile") from e

@@ -4,7 +4,6 @@ import os
 import re
 import time
 import traceback
-
 from typing import (
     Any,
     List,
@@ -22,7 +21,10 @@ from typing import (
 import botocore
 from botocore.exceptions import TokenRetrievalError
 from fastapi import HTTPException
-from langchain_community.adapters.openai import convert_openai_messages
+from langchain_community.adapters.openai import (
+    convert_openai_messages,
+    convert_message_to_dict,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -39,7 +41,6 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, create_react_agent
 from langgraph.store.base import BaseStore
-from langmem import create_search_memory_tool
 from openai import NotGiven, NOT_GIVEN
 from openai.types import CompletionUsage
 from openai.types.chat import (
@@ -60,22 +61,22 @@ from language_model_gateway.gateway.converters.my_messages_state import MyMessag
 from language_model_gateway.gateway.converters.streaming_tool_node import (
     StreamingToolNode,
 )
+from language_model_gateway.gateway.converters.streaming_utils import (
+    format_chat_completion_chunk_sse,
+    format_done_sse,
+)
 from language_model_gateway.gateway.schema.openai.completions import (
     ChatRequest,
 )
 from language_model_gateway.gateway.structures.request_information import (
     RequestInformation,
 )
-from language_model_gateway.gateway.tools.get_user_info_tool import GetUserInfoTool
-from language_model_gateway.gateway.tools.memories.store_user_profile_tool import (
-    StoreUserProfileTool,
-)
 from language_model_gateway.gateway.utilities.chat_message_helpers import (
     langchain_to_chat_message,
     convert_message_content_to_string,
 )
-from language_model_gateway.gateway.utilities.environment_variables import (
-    EnvironmentVariables,
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
 )
 from language_model_gateway.gateway.utilities.json_extractor import JsonExtractor
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
@@ -91,11 +92,15 @@ class LangGraphToOpenAIConverter:
     def __init__(
         self,
         *,
-        environment_variables: EnvironmentVariables,
+        environment_variables: LanguageModelGatewayEnvironmentVariables,
         token_reducer: TokenReducer,
     ) -> None:
-        self.environment_variables: EnvironmentVariables = environment_variables
-        if not isinstance(self.environment_variables, EnvironmentVariables):
+        self.environment_variables: LanguageModelGatewayEnvironmentVariables = (
+            environment_variables
+        )
+        if not isinstance(
+            self.environment_variables, LanguageModelGatewayEnvironmentVariables
+        ):
             raise TypeError(
                 f"environment_variables must be EnvironmentVariables, got {type(self.environment_variables)}"
             )
@@ -130,6 +135,21 @@ class LangGraphToOpenAIConverter:
             The streaming response as a string.
         """
         request_id = request_information.request_id
+
+        # Track tool start times for concurrent tool runs
+        tool_start_times: Dict[str, float] = {}
+
+        def make_tool_key(
+            tool_name1: Optional[str], tool_input1: Optional[Dict[str, Any]]
+        ) -> str:
+            # Use tool name and a hash of the input for uniqueness
+            if tool_name1 is None:
+                tool_name1 = "unknown"
+            try:
+                tool_input_str = json.dumps(tool_input1, sort_keys=True, default=str)
+            except Exception:
+                tool_input_str = str(tool_input1)
+            return f"{tool_name1}:{hash(tool_input_str)}"
 
         try:
             # Process streamed events from the graph and yield messages over the SSE stream.
@@ -208,7 +228,9 @@ class LangGraphToOpenAIConverter:
                                         object="chat.completion.chunk",
                                     )
                                 )
-                                yield f"data: {json.dumps(chat_model_stream_response.model_dump())}\n\n"
+                                yield format_chat_completion_chunk_sse(
+                                    chat_model_stream_response.model_dump()
+                                )
                     case "on_chain_end":
                         # print(f"===== {event_type} =====\n{event}\n")
                         event_dict = cast(dict[str, Any], event_object)
@@ -237,7 +259,9 @@ class LangGraphToOpenAIConverter:
                                     object="chat.completion.chunk",
                                 )
                             )
-                            yield f"data: {json.dumps(chat_end_stream_response.model_dump())}\n\n"
+                            yield format_chat_completion_chunk_sse(
+                                chat_end_stream_response.model_dump()
+                            )
                     case "on_tool_start":
                         # Handle the start of the tool event
                         event_dict = cast(dict[str, Any], event_object)
@@ -255,6 +279,10 @@ class LangGraphToOpenAIConverter:
                             tool_input_display["auth_token"] = "***"
                         if tool_input_display and "state" in tool_input_display:
                             tool_input_display["state"] = "***"
+
+                        # Track start time for this tool invocation
+                        tool_key = make_tool_key(tool_name, tool_input)
+                        tool_start_times[tool_key] = time.time()
 
                         if tool_name:
                             logger.debug(
@@ -280,7 +308,9 @@ class LangGraphToOpenAIConverter:
                                 ),
                                 object="chat.completion.chunk",
                             )
-                            yield f"data: {json.dumps(chat_stream_response.model_dump())}\n\n"
+                            yield format_chat_completion_chunk_sse(
+                                chat_stream_response.model_dump()
+                            )
 
                     case "on_tool_end":
                         # Handle the end of the tool event
@@ -288,19 +318,38 @@ class LangGraphToOpenAIConverter:
                         tool_message: ToolMessage | None = event_dict.get(
                             "data", {}
                         ).get("output")
+                        # Try to get tool name and input from tool_message or event_dict
+                        tool_name2: Optional[str] = None
+                        tool_input2: Optional[Dict[str, Any]] = None
+                        if tool_message:
+                            tool_name2 = getattr(tool_message, "name", None)
+                            tool_input2 = getattr(tool_message, "input", None)
+                        if not tool_name2:
+                            tool_name2 = event_dict.get("name", None)
+                        if not tool_input2:
+                            tool_input2 = event_dict.get("data", {}).get("input")
+                        tool_key = make_tool_key(tool_name2, tool_input2)
+                        start_time = tool_start_times.pop(tool_key, None)
+                        runtime_str = ""
+                        if start_time is not None:
+                            elapsed = time.time() - start_time
+                            runtime_str = f"{elapsed:.2f}s"
+                            logger.info(
+                                f"Tool {tool_name2} completed in {elapsed:.2f} seconds."
+                            )
+                        else:
+                            logger.warning(
+                                f"Tool {tool_name2} end event received without matching start event."
+                            )
                         if tool_message:
                             artifact: Optional[Any] = tool_message.artifact
-
-                            # print(f"on_tool_end: {tool_message}")
                             return_raw_tool_output: bool = (
                                 os.environ.get("RETURN_RAW_TOOL_OUTPUT", "0") == "1"
                             )
                             if artifact or return_raw_tool_output:
                                 tool_message_content: str = (
-                                    tool_message.content
-                                    if isinstance(tool_message.content, str)
-                                    else " ".join(
-                                        [str(c) for c in tool_message.content]
+                                    self.convert_message_content_into_string(
+                                        tool_message=tool_message
                                     )
                                 )
                                 if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
@@ -316,9 +365,11 @@ class LangGraphToOpenAIConverter:
 
                                 tool_progress_message: str = (
                                     (
-                                        f"\n> ==== Raw responses from Agent {tool_message.name} [tokens: {token_count}] ====="
-                                        f"\n>{tool_message_content}"
-                                        f"\n> ==== End Raw responses from Agent {tool_message.name} [tokens: {token_count}] =====\n"
+                                        f"```"
+                                        f"\n==== Raw responses from Agent {tool_message.name} [tokens: {token_count}] [runtime: {runtime_str}] ====="
+                                        f"\n{tool_message_content}"
+                                        f"\n==== End Raw responses from Agent {tool_message.name} [tokens: {token_count}] [runtime: {runtime_str}] ====="
+                                        f"\n```\n"
                                     )
                                     if return_raw_tool_output
                                     else f"\n> {artifact}"
@@ -348,7 +399,35 @@ class LangGraphToOpenAIConverter:
                                     ),
                                     object="chat.completion.chunk",
                                 )
-                                yield f"data: {json.dumps(chat_stream_response.model_dump())}\n\n"
+                                yield format_chat_completion_chunk_sse(
+                                    chat_stream_response.model_dump()
+                                )
+                        else:
+                            logger.debug("on_tool_end: no tool message output")
+                            chat_stream_response = ChatCompletionChunk(
+                                id=request_id,
+                                created=int(time.time()),
+                                model=request["model"],
+                                choices=[
+                                    ChunkChoice(
+                                        index=0,
+                                        delta=ChoiceDelta(
+                                            role="assistant",
+                                            content=f"\n\n> Tool completed with no output.{runtime_str}\n",
+                                        ),
+                                    )
+                                ],
+                                usage=CompletionUsage(
+                                    prompt_tokens=0,
+                                    completion_tokens=0,
+                                    total_tokens=0,
+                                ),
+                                object="chat.completion.chunk",
+                            )
+                            yield format_chat_completion_chunk_sse(
+                                chat_stream_response.model_dump()
+                            )
+
                     case _:
                         # Handle other event types
                         pass
@@ -373,7 +452,7 @@ class LangGraphToOpenAIConverter:
                 ),
                 object="chat.completion.chunk",
             )
-            yield f"data: {json.dumps(chat_stream_response.model_dump())}\n\n"
+            yield format_chat_completion_chunk_sse(chat_stream_response.model_dump())
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(
@@ -398,9 +477,55 @@ class LangGraphToOpenAIConverter:
                 ),
                 object="chat.completion.chunk",
             )
-            yield f"data: {json.dumps(chat_stream_response.model_dump())}\n\n"
+            yield format_chat_completion_chunk_sse(chat_stream_response.model_dump())
 
-        yield "data: [DONE]\n\n"
+        yield format_done_sse()
+
+    @staticmethod
+    def convert_message_content_into_string(*, tool_message: ToolMessage) -> str:
+        def safe_json(string: str) -> Any:
+            try:
+                return json.loads(string)
+            except json.JSONDecodeError:
+                return None
+
+        if isinstance(tool_message.content, str):
+            # the content is str then just return it
+            # see if this is a json object embedded in text
+            json_content: Any = safe_json(tool_message.content)
+            if json_content is not None:
+                if isinstance(json_content, dict):
+                    text_message: str = ""
+                    if "result" in json_content:
+                        # https://github.com/open-webui/open-webui/discussions/11981
+                        result = json_content.get("result")
+                        if result:
+                            text_message += cast(str, json_content.get("result"))
+                    if "error" in json_content:
+                        error_message = json_content.get("error", "")
+                        if error_message:
+                            text_message += f"\nError: {error_message}\n"
+                    if "urls" in json_content:
+                        urls = json_content.get("urls", [])
+                        if isinstance(urls, list) and len(urls) > 0:
+                            text_message += "\nRelated URLs:\n"
+                            for url in urls:
+                                text_message += f"- {url}\n"
+                    return text_message
+            return tool_message.content
+
+        if (
+            isinstance(tool_message.content, list)
+            and len(tool_message.content) == 1
+            and isinstance(tool_message.content[0], dict)
+            and "result" in tool_message.content[0]
+        ):
+            return cast(str, tool_message.content[0].get("result"))
+
+        return (
+            # otherwise if content is a list, convert each item to str and join the items with a space
+            " ".join([str(c) for c in tool_message.content])
+        )
 
     async def call_agent_with_input(
         self,
@@ -427,7 +552,7 @@ class LangGraphToOpenAIConverter:
 
         if chat_request.get("stream"):
             return StreamingResponse(
-                await self.get_streaming_response_async(
+                content=await self.get_streaming_response_async(
                     request=chat_request,
                     compiled_state_graph=compiled_state_graph,
                     system_messages=system_messages,
@@ -766,17 +891,26 @@ class LangGraphToOpenAIConverter:
                 "user_id": request_information.user_id,
             }
         }
-        event: StandardStreamEvent | CustomStreamEvent
-        async for event in compiled_state_graph.astream_events(
-            input=self.create_state(
-                chat_request=request,
-                messages=messages,
-                request_information=request_information,
-            ),
-            version="v2",
-            config=config,
-        ):
-            yield event
+        try:
+            event: StandardStreamEvent | CustomStreamEvent
+            async for event in compiled_state_graph.astream_events(
+                input=self.create_state(
+                    chat_request=request,
+                    messages=messages,
+                    request_information=request_information,
+                ),
+                version="v2",
+                config=config,
+            ):
+                yield event
+        except Exception as e:
+            messages_dict: List[dict[str, Any]] = [
+                convert_message_to_dict(m) for m in messages
+            ]
+            logger.exception(
+                f"Exception occurred: {e}. Messages: {messages_dict}", stack_info=True
+            )
+            raise
 
     # noinspection SpellCheckingInspection
     async def ainvoke(
@@ -914,24 +1048,6 @@ class LangGraphToOpenAIConverter:
             The compiled state graph.
         """
         tool_node: Optional[ToolNode] = None
-
-        if self.environment_variables.enable_llm_memory and store is not None:
-            # Memory tools use LangGraph's BaseStore for persistence (4)
-            user_profile_namespace = ("memories", "{user_id}", "user_profile")
-            # memories_namespace = ("memories", "{user_id}", "memories")
-            tools = (
-                list(tools)
-                + [
-                    StoreUserProfileTool(  # All memories saved to this tool will live within this namespace
-                        # The brackets will be populated at runtime by the configurable values
-                        namespace=user_profile_namespace,
-                        # description="Update the existing user profile (or create a new one if it doesn't exist) based on the shared information.  Create one entry per user.",
-                    ),
-                    # ManageMemoryTool(namespace=memories_namespace),
-                    create_search_memory_tool(namespace=user_profile_namespace),
-                    GetUserInfoTool(),
-                ]
-            )
 
         if len(tools) > 0:
             tool_node = StreamingToolNode(tools)

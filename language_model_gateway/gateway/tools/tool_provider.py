@@ -1,6 +1,6 @@
 import logging
 from os import environ
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from langchain_community.tools import (
     DuckDuckGoSearchRun,
@@ -59,6 +59,18 @@ from language_model_gateway.gateway.tools.databricks_sql_tool import DatabricksS
 from language_model_gateway.gateway.tools.jira_issue_retriever import (
     JiraIssueRetriever,
 )
+from language_model_gateway.gateway.tools.memories.get_user_profile_tool import (
+    GetUserProfileTool,
+)
+from language_model_gateway.gateway.tools.memories.memory_read_tool import (
+    MemoryReadTool,
+)
+from language_model_gateway.gateway.tools.memories.memory_write_tool import (
+    MemoryWriteTool,
+)
+from language_model_gateway.gateway.tools.memories.store_user_profile_tool import (
+    StoreUserProfileTool,
+)
 from language_model_gateway.gateway.tools.network_topology_diagram_tool import (
     NetworkTopologyGeneratorTool,
 )
@@ -85,8 +97,8 @@ from language_model_gateway.gateway.tools.calculator_length_tool import (
 from language_model_gateway.gateway.utilities.confluence.confluence_helper import (
     ConfluenceHelper,
 )
-from language_model_gateway.gateway.utilities.environment_variables import (
-    EnvironmentVariables,
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
 )
 from language_model_gateway.gateway.utilities.github.github_pull_request_helper import (
     GithubPullRequestHelper,
@@ -110,13 +122,13 @@ class ToolProvider:
         image_generator_factory: ImageGeneratorFactory,
         file_manager_factory: FileManagerFactory,
         ocr_extractor_factory: OCRExtractorFactory,
-        environment_variables: EnvironmentVariables,
+        environment_variables: LanguageModelGatewayEnvironmentVariables,
         github_pull_request_helper: GithubPullRequestHelper,
         jira_issues_helper: JiraIssueHelper,
         confluence_helper: ConfluenceHelper,
         databricks_helper: DatabricksHelper,
     ) -> None:
-        web_search_tool: BaseTool
+        web_search_tool: Optional[BaseTool] = None
         default_web_search_tool: str = environ.get(
             "DEFAULT_WEB_SEARCH_TOOL", "duckduckgo"
         )
@@ -203,6 +215,10 @@ class ToolProvider:
             "confluence_page_retriever": ConfluencePageRetriever(
                 confluence_helper=confluence_helper
             ),
+            "get_user_profile": GetUserProfileTool(),
+            "store_user_profile": StoreUserProfileTool(),
+            "memory_writer": MemoryWriteTool(),
+            "memory_reader": MemoryReadTool(),
             # "sql_query": QuerySQLDataBaseTool(
             #     db=SQLDatabase(
             #         engine=Engine(
