@@ -1,7 +1,7 @@
 import base64
 import io
 import logging
-from typing import Type, Literal, Tuple, Optional, Dict
+from typing import Type, Literal, Tuple, Optional, Dict, override
 
 import httpx
 import pypdf
@@ -9,8 +9,8 @@ from httpx import Response, Headers
 from pydantic import BaseModel, Field
 from pypdf import PageObject
 
-from language_model_gateway.gateway.ocr.ocr_extractor import OCRExtractor
-from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtractorFactory
+from languagemodelcommon.ocr.ocr_extractor import OCRExtractor
+from languagemodelcommon.ocr.ocr_extractor_factory import OCRExtractorFactory
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
@@ -60,6 +60,7 @@ class PDFExtractionTool(ResilientBaseTool):
     ocr_extractor_factory: OCRExtractorFactory
     ocr_type: Literal["aws"] = "aws"
 
+    @override
     def _run(
         self,
         url: Optional[str] = None,
@@ -79,6 +80,7 @@ class PDFExtractionTool(ResilientBaseTool):
         """
         raise NotImplementedError("Use async version of this tool")
 
+    @override
     async def _arun(
         self,
         url: Optional[str] = None,

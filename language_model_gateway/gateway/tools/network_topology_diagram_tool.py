@@ -1,19 +1,35 @@
+from __future__ import annotations
+
 import logging
-import os
 import tempfile
-from typing import Type, Literal, Tuple, Optional, List, Dict, Any
+from typing import (
+    TYPE_CHECKING,
+    Type,
+    Literal,
+    Tuple,
+    Optional,
+    List,
+    Dict,
+    Any,
+    override,
+)
 from uuid import uuid4
 
 from graphviz import Graph  # Note: Using Graph instead of Digraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
-from language_model_gateway.gateway.file_managers.file_manager import FileManager
-from language_model_gateway.gateway.file_managers.file_manager_factory import (
+from languagemodelcommon.file_managers.file_manager import FileManager
+from languagemodelcommon.file_managers.file_manager_factory import (
     FileManagerFactory,
 )
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+
+if TYPE_CHECKING:
+    from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+        LanguageModelGatewayEnvironmentVariables,
+    )
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
-from language_model_gateway.gateway.utilities.url_parser import UrlParser
+from languagemodelcommon.utilities.url_parser import UrlParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
@@ -62,10 +78,23 @@ class NetworkTopologyGeneratorTool(ResilientBaseTool):
     args_schema: Type[BaseModel] = NetworkTopologyInput
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
     file_manager_factory: FileManagerFactory
+    _environment_variables: LanguageModelGatewayEnvironmentVariables | None = (
+        PrivateAttr(default=None)
+    )
 
+    def __init__(
+        self,
+        environment_variables: LanguageModelGatewayEnvironmentVariables | None = None,
+        **data: Any,
+    ) -> None:
+        super().__init__(**data)
+        self._environment_variables = environment_variables
+
+    @override
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Use async version of this tool")
 
+    @override
     async def _arun(
         self,
         nodes: Dict[str, Dict[str, str]],
@@ -183,8 +212,11 @@ class NetworkTopologyGeneratorTool(ResilientBaseTool):
             image_file_name: str = f"{uuid4()}.png"
 
             # Use file manager to save the file
-            image_generation_path_ = os.environ.get(
-                "IMAGE_GENERATION_PATH", tempfile.gettempdir()
+            image_generation_path_ = (
+                self._environment_variables.image_generation_path
+                if self._environment_variables
+                and self._environment_variables.image_generation_path
+                else tempfile.gettempdir()
             )
             file_manager: FileManager = self.file_manager_factory.get_file_manager(
                 folder=image_generation_path_
@@ -193,6 +225,7 @@ class NetworkTopologyGeneratorTool(ResilientBaseTool):
                 file_data=image_data,
                 folder=image_generation_path_,
                 filename=image_file_name,
+                content_type="image/png",
             )
             # Attempt to save the file
             if file_path is None:

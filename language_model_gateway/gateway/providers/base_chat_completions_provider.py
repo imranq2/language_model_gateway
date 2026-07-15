@@ -3,9 +3,11 @@ from typing import Dict
 
 from starlette.responses import StreamingResponse, JSONResponse
 
-from language_model_gateway.configs.config_schema import ChatModelConfig
-from language_model_gateway.gateway.auth.models.auth import AuthInformation
-from language_model_gateway.gateway.schema.openai.completions import ChatRequest
+from languagemodelcommon.configs.schemas.config_schema import ChatModelConfig
+from oidcauthlib.auth.models.auth import AuthInformation
+from languagemodelcommon.structures.openai.request.chat_request_wrapper import (
+    ChatRequestWrapper,
+)
 
 
 class BaseChatCompletionsProvider(metaclass=ABCMeta):
@@ -15,6 +17,6 @@ class BaseChatCompletionsProvider(metaclass=ABCMeta):
         *,
         model_config: ChatModelConfig,
         headers: Dict[str, str],
-        chat_request: ChatRequest,
+        chat_request_wrapper: ChatRequestWrapper,
         auth_information: AuthInformation,
     ) -> StreamingResponse | JSONResponse: ...

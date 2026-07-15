@@ -1,0 +1,2270 @@
+"""
+Unit and integration tests for CodingModelRouter.
+
+Tests cover:
+- Helper functions: _ThinkingStripper, _anthropic_to_openai_request,
+  _openai_to_anthropic_response, _is_throttling
+- Route registration
+- Invalid JSON → 400
+- count_tokens estimate for OpenAI api_type routes
+- Passthrough to Anthropic direct (streaming + non-streaming)
+- Unknown model fallback to Anthropic direct
+- Error response helpers (streaming + non-streaming)
+"""
+
+import asyncio
+import json
+import re
+import time
+from typing import Any, AsyncGenerator, Iterator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import openai
+import pytest
+from botocore.exceptions import ClientError
+from fastapi import FastAPI
+from oidcauthlib.auth.exceptions.authorization_bearer_token_invalid_exception import (
+    AuthorizationBearerTokenInvalidException,
+)
+from pytest_httpx import HTTPXMock
+from starlette.requests import Request
+
+from language_model_gateway.gateway.routers.model_routing.bedrock_client import (
+    _is_throttling,
+)
+from language_model_gateway.gateway.routers.model_routing.bedrock_converse_client import (
+    BedrockRuntimeClientProvider,
+)
+from language_model_gateway.gateway.routers.model_routing.constants import (
+    _MAX_THROTTLE_RETRIES,
+)
+from language_model_gateway.gateway.routers.model_routing.message_translator import (
+    _anthropic_to_openai_request,
+    _openai_to_anthropic_response,
+)
+from language_model_gateway.gateway.routers.model_routing.aws_auth import (
+    _bedrock_credential_error_detail,
+)
+from language_model_gateway.gateway.routers.model_routing.route_config import _ROUTES
+from language_model_gateway.gateway.routers.model_routing.router import (
+    CodingModelRouter,
+)
+from language_model_gateway.gateway.routers.model_routing.stream_converter import (
+    ThinkingStripper as _ThinkingStripper,
+)
+
+# ---------------------------------------------------------------------------
+# _ThinkingStripper
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_stripper_no_think_block() -> None:
+    s = _ThinkingStripper()
+    assert s.feed("Hello world") == "Hello world"
+    assert s.flush() == ""
+
+
+def test_thinking_stripper_strips_block() -> None:
+    s = _ThinkingStripper()
+    visible = s.feed("<think>internal reasoning</think>answer")
+    assert "internal reasoning" not in visible
+    assert "answer" in visible
+
+
+def test_thinking_stripper_block_spanning_chunks() -> None:
+    s = _ThinkingStripper()
+    assert s.feed("<think>part") == ""
+    assert s.feed(" one</think>visible") == "visible"
+    assert s.flush() == ""
+
+
+def test_thinking_stripper_partial_open_tag_held_back() -> None:
+    s = _ThinkingStripper()
+    result = s.feed("text<thi")
+    assert result == "text"
+    assert s.flush() == "<thi"
+
+
+def test_thinking_stripper_flush_discards_open_block() -> None:
+    s = _ThinkingStripper()
+    s.feed("<think>never closed")
+    assert s.flush() == ""
+
+
+# ---------------------------------------------------------------------------
+# _is_throttling
+# ---------------------------------------------------------------------------
+
+
+def test_is_throttling_429() -> None:
+    assert _is_throttling(429) is True
+
+
+def test_is_throttling_context_overflow_not_throttling() -> None:
+    body = "input contains at least 200000 input tokens"
+    assert _is_throttling(400, body) is False
+
+
+def test_is_throttling_throttle_text_in_body() -> None:
+    assert _is_throttling(503, "Too many requests, please try again later") is True
+
+
+def test_is_throttling_clean_500() -> None:
+    assert _is_throttling(500, "Internal Server Error") is False
+
+
+# ---------------------------------------------------------------------------
+# _anthropic_to_openai_request
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_to_openai_simple_user_message() -> None:
+    body = {
+        "model": "claude-sonnet-4-6",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 100,
+    }
+    result = _anthropic_to_openai_request(body)
+    assert result["model"] == "claude-sonnet-4-6"
+    assert result["max_tokens"] == 100
+    assert result["messages"] == [{"role": "user", "content": "Hello"}]
+
+
+def test_anthropic_to_openai_system_prompt() -> None:
+    body = {
+        "model": "m",
+        "system": "You are helpful.",
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+    result = _anthropic_to_openai_request(body)
+    assert result["messages"][0] == {"role": "system", "content": "You are helpful."}
+    assert result["messages"][1]["role"] == "user"
+
+
+def test_anthropic_to_openai_tool_use_in_assistant() -> None:
+    body = {
+        "model": "m",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Using tool"},
+                    {
+                        "type": "tool_use",
+                        "id": "tool_123",
+                        "name": "search",
+                        "input": {"query": "test"},
+                    },
+                ],
+            }
+        ],
+    }
+    result = _anthropic_to_openai_request(body)
+    msg = result["messages"][0]
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "Using tool"
+    assert len(msg["tool_calls"]) == 1
+    assert msg["tool_calls"][0]["function"]["name"] == "search"
+
+
+def test_anthropic_to_openai_tool_result_becomes_tool_role() -> None:
+    body = {
+        "model": "m",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool_123",
+                        "content": "search result",
+                    }
+                ],
+            }
+        ],
+    }
+    result = _anthropic_to_openai_request(body)
+    msg = result["messages"][0]
+    assert msg["role"] == "tool"
+    assert msg["tool_call_id"] == "tool_123"
+    assert msg["content"] == "search result"
+
+
+def test_anthropic_to_openai_tools_translated() -> None:
+    body = {
+        "model": "m",
+        "messages": [],
+        "tools": [
+            {
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+    }
+    result = _anthropic_to_openai_request(body)
+    assert result["tools"][0]["type"] == "function"
+    assert result["tools"][0]["function"]["name"] == "get_weather"
+    assert result["tools"][0]["function"]["parameters"] == {
+        "type": "object",
+        "properties": {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# _openai_to_anthropic_response
+# ---------------------------------------------------------------------------
+
+
+def test_openai_to_anthropic_text_response() -> None:
+    oai = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello there",
+                    "tool_calls": None,
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    result = _openai_to_anthropic_response(oai, "msg_abc", "upstream-model")
+    assert result["id"] == "msg_abc"
+    assert result["type"] == "message"
+    assert result["role"] == "assistant"
+    assert result["model"] == "upstream-model"
+    assert result["stop_reason"] == "end_turn"
+    assert result["content"][0]["type"] == "text"
+    assert result["content"][0]["text"] == "Hello there"
+    assert result["usage"]["input_tokens"] == 10
+    assert result["usage"]["output_tokens"] == 5
+
+
+def test_openai_to_anthropic_maps_cached_tokens_to_cache_read_input_tokens() -> None:
+    """Bedrock Mantle is a conformant OpenAI Chat Completions endpoint —
+    usage.prompt_tokens_details.cached_tokens must map onto Anthropic's
+    cache_read_input_tokens, per anthropics/claude-code#13385.
+    cache_creation_input_tokens has no OpenAI equivalent but must still be
+    present (defaulting to 0), not omitted."""
+    oai = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "hi", "tool_calls": None},
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 100},
+        },
+    }
+    result = _openai_to_anthropic_response(oai, "msg_abc", "upstream-model")
+    assert result["usage"] == {
+        "input_tokens": 50,
+        "output_tokens": 10,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 100,
+    }
+
+
+def test_openai_to_anthropic_missing_prompt_tokens_details_defaults_cache_to_zero() -> (
+    None
+):
+    oai = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "hi", "tool_calls": None},
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+    }
+    result = _openai_to_anthropic_response(oai, "msg_abc", "upstream-model")
+    assert result["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+
+def test_openai_to_anthropic_strips_think_blocks() -> None:
+    oai = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "<think>reasoning</think>Visible answer",
+                    "tool_calls": None,
+                },
+            }
+        ],
+        "usage": {},
+    }
+    result = _openai_to_anthropic_response(oai, "msg_x", "m")
+    assert result["content"][0]["text"] == "Visible answer"
+
+
+def test_openai_to_anthropic_tool_call_response() -> None:
+    oai = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": '{"query": "test"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {},
+    }
+    result = _openai_to_anthropic_response(oai, "msg_y", "m")
+    assert result["stop_reason"] == "tool_use"
+    tool_block = result["content"][0]
+    assert tool_block["type"] == "tool_use"
+    assert tool_block["name"] == "search"
+    assert tool_block["input"] == {"query": "test"}
+
+
+# ---------------------------------------------------------------------------
+# Route registration
+# ---------------------------------------------------------------------------
+
+
+def test_coding_model_router_registers_messages_route() -> None:
+    from fastapi.routing import APIRoute
+
+    router = CodingModelRouter()
+    paths = {r.path for r in router.get_router().routes if isinstance(r, APIRoute)}
+    assert "/v1/messages" in paths
+    assert "/v1/messages/count_tokens" in paths
+
+
+def test_bedrock_transport_defaults_to_mantle() -> None:
+    router = CodingModelRouter()
+    assert router._bedrock_transport == "mantle"
+
+
+def test_bedrock_transport_stores_native_override() -> None:
+    router = CodingModelRouter(bedrock_transport="native")
+    assert router._bedrock_transport == "native"
+
+
+# ---------------------------------------------------------------------------
+# _get_auth_info — usage-tracking identity validation
+#
+# x-openwebui-user-id/x-customer-id/etc. headers are fully caller-controlled,
+# so they must never be trusted for usage-tracking attribution unless the
+# Authorization header verifies as a genuine, signature-checked OIDC token.
+# ---------------------------------------------------------------------------
+
+
+def _make_request(headers: dict[str, str]) -> Request:
+    scope = {
+        "type": "http",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+    }
+    return Request(scope)
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_no_token_reader_ignores_identity_headers() -> None:
+    """Without a token_reader configured, identity headers must not be trusted."""
+    router = CodingModelRouter()
+    request = _make_request({"x-openwebui-user-id": "victim@example.com"})
+
+    auth_info = await router._get_auth_info(request)
+
+    assert "user_id" not in auth_info
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_no_authorization_header_ignores_identity_headers() -> None:
+    """No Authorization header at all means no verified identity."""
+    token_reader = MagicMock()
+    router = CodingModelRouter(token_reader=token_reader)
+    request = _make_request({"x-openwebui-user-id": "victim@example.com"})
+
+    auth_info = await router._get_auth_info(request)
+
+    assert "user_id" not in auth_info
+    token_reader.verify_token_async.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_invalid_token_ignores_identity_headers() -> None:
+    """An Authorization header that fails verification must not fall back to
+    trusting caller-controlled identity headers (this is the IDOR closed by
+    this fix — a spoofed/opaque Bearer value must not grant attribution)."""
+    token_reader = MagicMock()
+    token_reader.extract_token.return_value = "not-a-real-jwt"
+    token_reader.verify_token_async = AsyncMock(
+        side_effect=AuthorizationBearerTokenInvalidException(
+            message="bad token", token="not-a-real-jwt"
+        )
+    )
+    router = CodingModelRouter(token_reader=token_reader)
+    request = _make_request(
+        {
+            "authorization": "Bearer not-a-real-jwt",
+            "x-openwebui-user-id": "victim@example.com",
+        }
+    )
+
+    auth_info = await router._get_auth_info(request)
+
+    assert "user_id" not in auth_info
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_valid_token_uses_verified_identity_not_headers() -> None:
+    """A verified token's claims are used for attribution, taking precedence
+    over (and ignoring) any caller-supplied identity headers."""
+    verified_token = MagicMock()
+    verified_token.subject = "verified-user-123"
+    verified_token.email = "verified@example.com"
+    verified_token.name = "Verified User"
+
+    token_reader = MagicMock()
+    token_reader.extract_token.return_value = "a.valid.jwt"
+    token_reader.verify_token_async = AsyncMock(return_value=verified_token)
+    router = CodingModelRouter(token_reader=token_reader)
+    request = _make_request(
+        {
+            "authorization": "Bearer a.valid.jwt",
+            "x-openwebui-user-id": "attacker-supplied-id",
+            "x-auth-provider": "okta",
+        }
+    )
+
+    auth_info = await router._get_auth_info(request)
+
+    assert auth_info["user_id"] == "verified-user-123"
+    assert auth_info["email"] == "verified@example.com"
+    assert auth_info["user_name"] == "Verified User"
+    assert auth_info["auth_provider"] == "okta"
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_falls_back_to_custom_header_when_unverified() -> None:
+    """With no verified identity, the operator-configured custom header wins."""
+    router = CodingModelRouter(custom_header_prefix="x-bwell-")
+    request = _make_request({"x-bwell-user-id": "imran.qureshi@bwell.com"})
+
+    auth_info = await router._get_auth_info(request)
+
+    assert auth_info["user_id"] == "imran.qureshi@bwell.com"
+    assert auth_info["auth_provider"] == "custom-header"
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_verified_identity_wins_over_custom_header() -> None:
+    """A verified OIDC identity still takes precedence over the custom header."""
+    verified_token = MagicMock()
+    verified_token.subject = "verified-user-123"
+    verified_token.email = None
+    verified_token.name = None
+
+    token_reader = MagicMock()
+    token_reader.extract_token.return_value = "a.valid.jwt"
+    token_reader.verify_token_async = AsyncMock(return_value=verified_token)
+    router = CodingModelRouter(
+        token_reader=token_reader, custom_header_prefix="x-bwell-"
+    )
+    request = _make_request(
+        {
+            "authorization": "Bearer a.valid.jwt",
+            "x-bwell-user-id": "someone-else@bwell.com",
+        }
+    )
+
+    auth_info = await router._get_auth_info(request)
+
+    assert auth_info["user_id"] == "verified-user-123"
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_no_custom_header_present() -> None:
+    """No fallback header present means no user_id, same as before."""
+    router = CodingModelRouter(custom_header_prefix="x-bwell-")
+    request = _make_request({})
+
+    auth_info = await router._get_auth_info(request)
+
+    assert "user_id" not in auth_info
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_captures_all_prefixed_headers() -> None:
+    """Any header under the prefix is captured, not just user-id — new
+    attribution headers can be added later without a code change here."""
+    router = CodingModelRouter(custom_header_prefix="x-bwell-")
+    request = _make_request(
+        {
+            "x-bwell-user-id": "imran.qureshi@bwell.com",
+            "x-bwell-project": "language-model-gateway",
+            "x-openwebui-user-id": "not-under-our-prefix",
+        }
+    )
+
+    auth_info = await router._get_auth_info(request)
+
+    assert auth_info["custom_headers"] == {
+        "user-id": "imran.qureshi@bwell.com",
+        "project": "language-model-gateway",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_auth_info_no_custom_headers_key_when_none_present() -> None:
+    router = CodingModelRouter(custom_header_prefix="x-bwell-")
+    request = _make_request({"authorization": "Bearer irrelevant"})
+
+    auth_info = await router._get_auth_info(request)
+
+    assert "custom_headers" not in auth_info
+
+
+# ---------------------------------------------------------------------------
+# _bedrock_credential_error_detail — classifies AWS credential failures so
+# each gets a distinct error_type/actionable message instead of every
+# non-TokenRetrievalError case falling through generically.
+# ---------------------------------------------------------------------------
+
+
+def test_bedrock_credential_error_detail_token_retrieval_error() -> None:
+    from botocore.exceptions import TokenRetrievalError
+
+    exc = TokenRetrievalError(provider="sso", error_msg="token expired")
+
+    detail = _bedrock_credential_error_detail(exc)
+
+    assert detail is not None
+    error_type, message = detail
+    assert error_type == "bedrock_session_expired"
+    assert "aws sso login" in message
+
+
+def test_bedrock_credential_error_detail_no_credentials_available() -> None:
+    from language_model_gateway.gateway.routers.model_routing.aws_auth import (
+        BedrockCredentialsUnavailableError,
+    )
+
+    exc = BedrockCredentialsUnavailableError("No AWS credentials available")
+
+    detail = _bedrock_credential_error_detail(exc)
+
+    assert detail is not None
+    error_type, message = detail
+    assert error_type == "bedrock_no_credentials"
+    assert "AWS_PROFILE" in message
+
+
+def test_bedrock_credential_error_detail_botocore_client_error() -> None:
+    from botocore.exceptions import ClientError
+
+    exc = ClientError(
+        error_response={"Error": {"Code": "ExpiredTokenException", "Message": "x"}},
+        operation_name="AssumeRole",
+    )
+
+    detail = _bedrock_credential_error_detail(exc)
+
+    assert detail is not None
+    error_type, _ = detail
+    assert error_type == "bedrock_credential_error"
+
+
+def test_bedrock_credential_error_detail_checks_cause_and_context() -> None:
+    """The credential exception is often wrapped (raised via `from` or an
+    implicit `except`-block context) rather than being the exception itself —
+    both must be checked, not just the top-level exception."""
+    from botocore.exceptions import TokenRetrievalError
+
+    cause = TokenRetrievalError(provider="sso", error_msg="token expired")
+    wrapper = RuntimeError("wrapped")
+    wrapper.__cause__ = cause
+
+    detail = _bedrock_credential_error_detail(wrapper)
+
+    assert detail is not None
+    assert detail[0] == "bedrock_session_expired"
+
+
+def test_bedrock_credential_error_detail_none_for_unrelated_error() -> None:
+    assert _bedrock_credential_error_detail(ValueError("unrelated")) is None
+
+
+# ---------------------------------------------------------------------------
+# _attach_account_uuid — records Claude Code's account_uuid on auth_info,
+# unresolved (email resolution now happens downstream in reporting).
+# ---------------------------------------------------------------------------
+
+
+def test_attach_account_uuid_sets_it_from_body_metadata() -> None:
+    """Should record account_uuid on auth_info when present in request metadata."""
+    router = CodingModelRouter()
+
+    auth_info: dict[str, object] = {}
+    body_json = {
+        "metadata": {
+            "user_id": '{"account_uuid": "acct-123", "device_id": "d", "session_id": "s"}'
+        }
+    }
+
+    router._attach_account_uuid(auth_info, body_json)
+
+    assert auth_info["account_uuid"] == "acct-123"
+    assert "user_id" not in auth_info
+    assert "email" not in auth_info
+
+
+def test_attach_account_uuid_does_not_override_verified_identity() -> None:
+    """Should leave a pre-existing user_id alone — this never resolves identity."""
+    router = CodingModelRouter()
+
+    auth_info: dict[str, object] = {"user_id": "verified-subject"}
+    body_json = {"metadata": {"user_id": '{"account_uuid": "acct-123"}'}}
+
+    router._attach_account_uuid(auth_info, body_json)
+
+    assert auth_info["user_id"] == "verified-subject"
+    assert auth_info["account_uuid"] == "acct-123"
+
+
+def test_attach_account_uuid_noop_when_account_uuid_missing() -> None:
+    """Should be a no-op when the request body has no extractable account_uuid."""
+    router = CodingModelRouter()
+
+    auth_info: dict[str, object] = {}
+    body_json: dict[str, object] = {}
+
+    router._attach_account_uuid(auth_info, body_json)
+
+    assert auth_info == {}
+
+
+# ---------------------------------------------------------------------------
+# _attach_claude_code_headers — session_id from the documented
+# x-claude-code-session-id header (preferred), agent_id/parent_agent_id for
+# subagent cost attribution.
+# ---------------------------------------------------------------------------
+
+
+def test_attach_claude_code_headers_prefers_session_header_over_body_metadata() -> None:
+    router = CodingModelRouter()
+    auth_info: dict[str, object] = {}
+    request = _make_request({"x-claude-code-session-id": "sess-from-header"})
+    body_json = {"metadata": {"user_id": '{"session_id": "sess-from-body"}'}}
+
+    router._attach_claude_code_headers(auth_info, request, body_json)
+
+    assert auth_info["session_id"] == "sess-from-header"
+
+
+def test_attach_claude_code_headers_falls_back_to_body_metadata() -> None:
+    """No x-claude-code-session-id header: fall back to the body blob."""
+    router = CodingModelRouter()
+    auth_info: dict[str, object] = {}
+    request = _make_request({})
+    body_json = {"metadata": {"user_id": '{"session_id": "sess-from-body"}'}}
+
+    router._attach_claude_code_headers(auth_info, request, body_json)
+
+    assert auth_info["session_id"] == "sess-from-body"
+
+
+def test_attach_claude_code_headers_captures_agent_ids() -> None:
+    router = CodingModelRouter()
+    auth_info: dict[str, object] = {}
+    request = _make_request(
+        {
+            "x-claude-code-session-id": "sess-1",
+            "x-claude-code-agent-id": "agent-1",
+            "x-claude-code-parent-agent-id": "agent-0",
+        }
+    )
+
+    router._attach_claude_code_headers(auth_info, request, {})
+
+    assert auth_info["agent_id"] == "agent-1"
+    assert auth_info["parent_agent_id"] == "agent-0"
+
+
+def test_attach_claude_code_headers_omits_agent_ids_when_absent() -> None:
+    """A main-session request (not a subagent) carries no agent-id headers."""
+    router = CodingModelRouter()
+    auth_info: dict[str, object] = {}
+    request = _make_request({"x-claude-code-session-id": "sess-1"})
+
+    router._attach_claude_code_headers(auth_info, request, {})
+
+    assert "agent_id" not in auth_info
+    assert "parent_agent_id" not in auth_info
+
+
+# ---------------------------------------------------------------------------
+# _record_upstream_latency — model_tier latency visibility (Groundcover)
+# ---------------------------------------------------------------------------
+
+
+def test_record_upstream_latency_sets_span_attributes() -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer(__name__)
+
+    with tracer.start_as_current_span("test-span"):
+        dispatch_start = time.perf_counter() - 0.05  # simulate 50ms elapsed
+        CodingModelRouter._record_upstream_latency(
+            dispatch_start,
+            model_tier="sonnet",
+            upstream_model="claude-sonnet-4-6",
+            auth="passthrough",
+            api_type="anthropic",
+        )
+
+    (span,) = exporter.get_finished_spans()
+    attributes = span.attributes
+    assert attributes is not None
+    assert attributes["model_tier"] == "sonnet"
+    assert attributes["upstream_model"] == "claude-sonnet-4-6"
+    assert attributes["auth_strategy"] == "passthrough"
+    assert attributes["api_type"] == "anthropic"
+    latency_ms = attributes["upstream_latency_ms"]
+    assert isinstance(latency_ms, (int, float)) and latency_ms >= 50
+
+
+def test_record_upstream_latency_noop_without_active_span() -> None:
+    """With no active span (e.g. tracing disabled), this must not raise —
+    OpenTelemetry's no-op span silently absorbs set_attribute calls."""
+    dispatch_start = time.perf_counter()
+    CodingModelRouter._record_upstream_latency(
+        dispatch_start,
+        model_tier="haiku",
+        upstream_model="claude-haiku-4-5",
+        auth="aws",
+        api_type="openai",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests via ASGI client
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_returns_400(router_client: httpx.AsyncClient) -> None:
+    response = await router_client.post(
+        "/v1/messages",
+        content=b"not valid json",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "invalid JSON body" in response.text
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_openai_route_returns_estimate(
+    router_client: httpx.AsyncClient,
+) -> None:
+    fake_route = {
+        "claude_model": "claude-test-model",
+        "url": "https://example.bedrock.aws/v1/chat/completions",
+        "model": "upstream-model",
+        "auth": "aws",
+        "api_type": "openai",
+    }
+    with patch.dict(_ROUTES, {"claude-test-model": fake_route}):
+        body = {
+            "model": "claude-test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        response = await router_client.post(
+            "/v1/messages/count_tokens",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert "input_tokens" in data
+    assert isinstance(data["input_tokens"], int)
+    assert data["input_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_passthrough_unknown_model_calls_anthropic(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    upstream_body = json.dumps(
+        {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hi"}],
+            "model": "claude-unknown",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        }
+    ).encode()
+
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=upstream_body,
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await router_client.post(
+        "/v1/messages",
+        json=body,
+        headers={
+            "content-type": "application/json",
+            "authorization": "Bearer test-key",
+        },
+    )
+    assert response.status_code == 200
+    intercepted = httpx_mock.get_requests()
+    assert len(intercepted) == 1
+    assert str(intercepted[0].url).startswith("https://api.anthropic.com/v1/messages")
+
+
+@pytest.mark.asyncio
+async def test_passthrough_unknown_model_count_tokens(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Test that /count_tokens works for unknown models (falls back to Anthropic direct)."""
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages/count_tokens",
+        method="POST",
+        status_code=200,
+        content=b'{"error": {"type": "unknown_model"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+    response = await router_client.post(
+        "/v1/messages/count_tokens",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    intercepted = httpx_mock.get_requests()
+    assert len(intercepted) == 1
+    # Verify the URL is correct - the fallback should not double-append /count_tokens
+    assert (
+        str(intercepted[0].url) == "https://api.anthropic.com/v1/messages/count_tokens"
+    )
+
+
+@pytest.mark.asyncio
+async def test_passthrough_route_forwards_auth_header(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    fake_route = {
+        "claude_model": "claude-passthrough-test",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-passthrough-test",
+        "auth": "passthrough",
+    }
+    upstream_body = json.dumps(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "response"}],
+            "model": "claude-passthrough-test",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    ).encode()
+
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=upstream_body,
+        headers={"content-type": "application/json"},
+    )
+
+    with patch.dict(_ROUTES, {"claude-passthrough-test": fake_route}):
+        body = {
+            "model": "claude-passthrough-test",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={
+                "content-type": "application/json",
+                "authorization": "Bearer my-api-key",
+            },
+        )
+
+    assert response.status_code == 200
+    intercepted = httpx_mock.get_requests()
+    assert len(intercepted) == 1
+    forwarded_auth = intercepted[0].headers.get("authorization", "")
+    assert forwarded_auth == "Bearer my-api-key"
+
+
+@pytest.mark.asyncio
+async def test_custom_header_prefix_stripped_before_forwarding_upstream(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Headers under the custom prefix are for local attribution only — never
+    forwarded to the upstream Anthropic/Bedrock API."""
+    fake_route = {
+        "claude_model": "claude-passthrough-test",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-passthrough-test",
+        "auth": "passthrough",
+    }
+    upstream_body = json.dumps(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "response"}],
+            "model": "claude-passthrough-test",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    ).encode()
+
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=upstream_body,
+        headers={"content-type": "application/json"},
+    )
+
+    with patch.dict(_ROUTES, {"claude-passthrough-test": fake_route}):
+        body = {
+            "model": "claude-passthrough-test",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={
+                "content-type": "application/json",
+                "authorization": "Bearer my-api-key",
+                "x-model-routing-user-id": "imran.qureshi@bwell.com",
+            },
+        )
+
+    assert response.status_code == 200
+    intercepted = httpx_mock.get_requests()
+    assert len(intercepted) == 1
+    assert "x-model-routing-user-id" not in intercepted[0].headers
+
+
+@pytest.mark.asyncio
+async def test_passthrough_forwards_clients_model_not_configured_model(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """
+    A passthrough route matched via claude_model_pattern (not the exact
+    claude_model key) must forward the client's exact requested model id, not
+    the pinned `model` value from config — Anthropic is authoritative on
+    which model ids exist, so a stale pinned id must never silently override
+    a newer one the client actually asked for.
+    """
+    fake_route = {
+        "claude_model": "claude-opus-stale-pin",
+        "claude_model_pattern": "^claude-opus-stale",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-opus-OLD-PINNED-ID",
+        "auth": "passthrough",
+    }
+    upstream_body = json.dumps(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-opus-stale-pin-v2",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    ).encode()
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=upstream_body,
+        headers={"content-type": "application/json"},
+    )
+
+    with patch(
+        "language_model_gateway.gateway.routers.model_routing.route_config._PATTERNS",
+        [(re.compile("^claude-opus-stale"), fake_route)],
+    ):
+        body = {
+            "model": "claude-opus-stale-pin-v2",  # matches via pattern, not exact key
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={
+                "content-type": "application/json",
+                "authorization": "Bearer key",
+            },
+        )
+
+    assert response.status_code == 200
+    intercepted = httpx_mock.get_requests()
+    sent_body = json.loads(intercepted[0].content)
+    assert sent_body["model"] == "claude-opus-stale-pin-v2"
+
+
+@pytest.mark.asyncio
+async def test_upstream_error_propagated(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=401,
+        content=b'{"error": {"message": "Unauthorized"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "unknown-model-triggers-fallback",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await router_client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unmatched_model_error_is_annotated_with_fallback_note(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """
+    When a model has no configured route, the request silently falls back to
+    Anthropic direct with no cost-routing or context-budget enforcement. If
+    that fallback request then errors upstream (e.g. context exceeded), the
+    client must see *why* — not just the bare upstream error — so the
+    confusing "context exceeded" symptom is traceable to the actual root
+    cause (missing route config).
+    """
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=400,
+        content=b'{"error": {"message": "prompt is too long: 205000 tokens"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-brand-new-tier-9",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await router_client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    error_message = response.json()["error"]["message"]
+    assert "claude-brand-new-tier-9" in error_message
+    assert "no configured route" in error_message
+    assert "prompt is too long: 205000 tokens" in error_message
+
+
+@pytest.mark.asyncio
+async def test_matched_route_error_is_not_annotated(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A route that *is* configured (not a fallback) must return the upstream
+    error verbatim — the annotation is only for unmatched-model fallbacks."""
+    fake_route = {
+        "claude_model": "claude-configured-test",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-configured-test",
+        "auth": "passthrough",
+    }
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=401,
+        content=b'{"error": {"message": "Unauthorized"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    with patch.dict(_ROUTES, {"claude-configured-test": fake_route}):
+        body = {
+            "model": "claude-configured-test",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": {"message": "Unauthorized"}}
+
+
+@pytest.mark.asyncio
+async def test_unmatched_model_malformed_error_still_gets_fallback_note(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """The fallback-route annotation must survive even when the upstream error
+    body isn't the `{"error": {"message": str}}` shape `_annotate_fallback_error`
+    knows how to rewrite in place (e.g. `{"error": {"code": ...}}`, no
+    "message" key) — the note must not be silently dropped just because the
+    body needs wrapping rather than passthrough."""
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=400,
+        content=b'{"error": {"code": "context_length_exceeded"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-brand-new-tier-malformed",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await router_client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    error_message = response.json()["error"]["message"]
+    assert "claude-brand-new-tier-malformed" in error_message
+    assert "no configured route" in error_message
+    assert "context_length_exceeded" in error_message
+
+
+@pytest.mark.asyncio
+async def test_matched_route_malformed_error_object_is_normalized(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """An `"error"` key alone isn't enough to pass a body through verbatim —
+    its value must actually be a usable message shape. `{"error": null}`
+    must be normalized into a real message, not forwarded as-is."""
+    fake_route = {
+        "claude_model": "claude-configured-malformed",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-configured-malformed",
+        "auth": "passthrough",
+    }
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=400,
+        content=b'{"error": null}',
+        headers={"content-type": "application/json"},
+    )
+
+    with patch.dict(_ROUTES, {"claude-configured-malformed": fake_route}):
+        body = {
+            "model": "claude-configured-malformed",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    error_message = response.json()["error"]["message"]
+    # Must not be forwarded verbatim (`None`/`null`) or leak Python repr
+    # syntax (single-quoted keys) — just a readable, JSON-safe description.
+    assert error_message != "null"
+    assert "'" not in error_message
+    assert "null" in error_message.lower() or "error" in error_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_matched_route_error_without_message_is_valid_json_not_python_repr(
+    router_client: httpx.AsyncClient,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """An error object present but missing a `message` field (e.g. just a
+    `code`) must be summarized as valid JSON text, not a Python dict repr
+    (single-quoted keys) leaking into a client-facing string."""
+    fake_route = {
+        "claude_model": "claude-configured-no-message",
+        "url": "https://api.anthropic.com/v1/messages",
+        "model": "claude-configured-no-message",
+        "auth": "passthrough",
+    }
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=429,
+        content=b'{"error": {"type": "rate_limit", "code": 42}}',
+        headers={"content-type": "application/json"},
+    )
+
+    with patch.dict(_ROUTES, {"claude-configured-no-message": fake_route}):
+        body = {
+            "model": "claude-configured-no-message",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await router_client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 429
+    error_message = response.json()["error"]["message"]
+    assert "'" not in error_message
+    assert "rate_limit" in error_message
+    assert "42" in error_message
+
+
+# ---------------------------------------------------------------------------
+# Anthropic-passthrough usage/error tracking (BAI-299)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def router_client_with_trackers() -> AsyncGenerator[
+    tuple[httpx.AsyncClient, MagicMock, MagicMock], None
+]:
+    """Same shape as `router_client`, but with mocked usage/error trackers
+    attached directly — avoids needing a real Mongo connection while still
+    exercising the router's own wiring (which fields it passes, when).
+
+    Returns the mocks themselves (not `router`) so callers assert against
+    `UsageTracker`/`ErrorTracker`-shaped mocks rather than the `X | None`
+    attribute type on CodingModelRouter.
+    """
+    router = CodingModelRouter()
+    usage_tracker = MagicMock()
+    usage_tracker.record_usage = AsyncMock()
+    usage_tracker.record_usage_from_anthropic_response = AsyncMock()
+    error_tracker = MagicMock()
+    error_tracker.record_error = AsyncMock()
+    router._usage_tracker = usage_tracker
+    router._error_tracker = error_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client, usage_tracker, error_tracker
+
+
+@pytest.mark.asyncio
+async def test_anthropic_passthrough_non_streaming_records_usage(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=json.dumps(
+            {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi"}],
+                "model": "claude-unknown",
+                "usage": {"input_tokens": 5, "output_tokens": 2},
+            }
+        ).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["usage"] == {"input_tokens": 5, "output_tokens": 2}
+    usage_tracker.record_usage_from_anthropic_response.assert_awaited_once()
+    call_kwargs = usage_tracker.record_usage_from_anthropic_response.call_args.kwargs
+    assert call_kwargs["model"] == "claude-unknown-model-xyz"
+    assert call_kwargs["streaming"] is False
+    assert call_kwargs["response_body"]["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 2,
+    }
+    error_tracker.record_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_passthrough_streaming_relays_bytes_and_records_usage(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    sse_body = (
+        b"event: message_start\n"
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":9,"output_tokens":1}}}\n\n'
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
+        b"event: message_delta\n"
+        b'data: {"type":"message_delta","usage":{"output_tokens":4}}\n\n'
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=200,
+        content=sse_body,
+        headers={"content-type": "text/event-stream"},
+    )
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": True,
+    }
+    response = await client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == sse_body
+
+    await asyncio.sleep(0)  # let the fire-and-forget usage-recording task run
+    usage_tracker.record_usage.assert_awaited_once()
+    call_kwargs = usage_tracker.record_usage.call_args.kwargs
+    assert call_kwargs["model"] == "claude-unknown-model-xyz"
+    assert call_kwargs["input_tokens"] == 9
+    assert call_kwargs["output_tokens"] == 4
+    assert call_kwargs["streaming"] is True
+    error_tracker.record_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_passthrough_upstream_error_records_error(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    httpx_mock.add_response(
+        url="https://api.anthropic.com/v1/messages",
+        method="POST",
+        status_code=503,
+        content=b'{"error": {"message": "overloaded"}}',
+        headers={"content-type": "application/json"},
+    )
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    response = await client.post(
+        "/v1/messages",
+        json=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 503
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["status_code"] == 503
+    assert call_kwargs["error_type"] == "upstream_error"
+    assert "overloaded" in call_kwargs["error_message"]
+    usage_tracker.record_usage_from_anthropic_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_passthrough_dispatch_failure_records_error(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A connection-level failure dispatching to Anthropic/Bedrock (timeout,
+    connection reset, DNS) previously re-raised with zero record in
+    model-router-errors — a real production 500 invisible to triage."""
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"))
+
+    body = {
+        "model": "claude-unknown-model-xyz",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": False,
+    }
+    with pytest.raises(httpx.ConnectError):
+        await client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "ConnectError"
+    assert "connection refused" in call_kwargs["error_message"]
+    usage_tracker.record_usage_from_anthropic_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bedrock_mantle_upstream_error_records_response_headers(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A non-streaming request that gets a 4xx/5xx HTTP response from Bedrock
+    Mantle raises `openai.APIStatusError`, which carries the full `httpx.Response`
+    (unlike the mid-stream `openai.APIError` case). The response headers —
+    e.g. an AWS request ID — must be captured in model-router-errors alongside
+    the body, since Mantle's error bodies are often too generic on their own
+    to correlate against AWS-side logs."""
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    fake_route = {
+        "claude_model": "claude-test-model-status-error",
+        "url": "https://example.bedrock.aws/v1/chat/completions",
+        "model": "qwen.qwen3-coder-next",
+        "auth": "passthrough",
+        "api_type": "openai",
+    }
+    httpx_mock.add_response(
+        url="https://example.bedrock.aws/v1/chat/completions",
+        method="POST",
+        status_code=500,
+        json={
+            "error": {
+                "message": "The server had an error while processing your request.",
+                "type": "server_error",
+                "code": "internal_server_error",
+            }
+        },
+        headers={
+            "content-type": "application/json",
+            "x-amzn-requestid": "req-status-error-xyz",
+        },
+    )
+
+    with patch.dict(_ROUTES, {"claude-test-model-status-error": fake_route}):
+        body = {
+            "model": "claude-test-model-status-error",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        response = await client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    # Bedrock/Mantle errors are surfaced to the client as a valid Anthropic
+    # assistant message (status 200) rather than propagating the upstream
+    # status code — see CodingModelRouter._error_response.
+    assert response.status_code == 200
+
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_upstream_error"
+    assert call_kwargs["status_code"] == 500
+    assert call_kwargs["response_headers"]["x-amzn-requestid"] == "req-status-error-xyz"
+    usage_tracker.record_usage_from_openai_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bedrock_mantle_mid_stream_error_records_full_detail(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Bedrock Mantle can send a `{"error": {...}}` SSE data event mid-stream
+    instead of a 4xx/5xx HTTP response. The openai SDK raises a plain
+    `openai.APIError` for this (no `.status_code`) — distinct from
+    `openai.APIStatusError`. Before this fix, that fell through to the
+    generic `except Exception` handler and only `str(exc)` (a generic
+    message) reached model-router-errors. The `.body`/`.code`/`.type` detail
+    the SDK actually attaches must now be captured.
+
+    Uses a `ValidationException`-coded error (not in
+    `_TRANSIENT_STREAM_ERROR_CODES`) so this stays a single-attempt failure —
+    retry behavior for the transient case is covered separately by
+    `test_bedrock_mantle_transient_stream_error_retries_then_gives_up`."""
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    fake_route = {
+        "claude_model": "claude-test-model-oai",
+        "url": "https://example.bedrock.aws/v1/chat/completions",
+        "model": "qwen.qwen3-coder-next",
+        "auth": "passthrough",
+        "api_type": "openai",
+    }
+    sse_body = (
+        b'data: {"error": {"message": "ValidationException: temperature must '
+        b'be between 0 and 1", "code": "ValidationException", '
+        b'"type": "invalid_request_error"}}\n\n'
+    )
+    httpx_mock.add_response(
+        url="https://example.bedrock.aws/v1/chat/completions",
+        method="POST",
+        status_code=200,
+        content=sse_body,
+        headers={
+            "content-type": "text/event-stream",
+            "x-amzn-requestid": "req-mid-stream-abc",
+        },
+    )
+
+    with patch.dict(_ROUTES, {"claude-test-model-oai": fake_route}):
+        body = {
+            "model": "claude-test-model-oai",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        response = await client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    assert (
+        b"ValidationException: temperature must be between 0 and 1" in response.content
+    )
+    # The client (e.g. Claude Code) must see the same code/type detail that's
+    # now captured in model-router-errors, not just the generic message.
+    assert b"invalid_request_error" in response.content
+
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_stream_error"
+    recorded = json.loads(call_kwargs["error_message"])
+    assert recorded["code"] == "ValidationException"
+    assert recorded["type"] == "invalid_request_error"
+    assert "temperature must be between 0 and 1" in recorded["message"]
+    assert recorded["body"]["code"] == "ValidationException"
+    # Bedrock Mantle's initial (successful) handshake response headers are
+    # captured too — the error itself only appears as a later SSE event on
+    # that same response, so there's no separate error-response to read
+    # headers from.
+    assert call_kwargs["response_headers"]["x-amzn-requestid"] == "req-mid-stream-abc"
+    usage_tracker.record_usage_from_openai_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bedrock_mantle_transient_stream_error_retries_then_gives_up(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A `ModelStreamErrorException` (Bedrock's own taxonomy for a transient,
+    retryable stream failure — network blip, momentary model overload) must
+    be retried with backoff like an HTTP-level throttle, not failed on the
+    first attempt. Previously this class of error (no HTTP status code, so
+    `_is_throttling` didn't apply) skipped the retry loop entirely regardless
+    of whether the underlying failure was transient."""
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    fake_route = {
+        "claude_model": "claude-test-model-retry",
+        "url": "https://example.bedrock.aws/v1/chat/completions",
+        "model": "qwen.qwen3-coder-next",
+        "auth": "passthrough",
+        "api_type": "openai",
+    }
+    sse_body = (
+        b'data: {"error": {"message": "ModelStreamErrorException: transient '
+        b'failure", "code": "ModelStreamErrorException", '
+        b'"type": "server_error"}}\n\n'
+    )
+    for _ in range(_MAX_THROTTLE_RETRIES + 1):
+        httpx_mock.add_response(
+            url="https://example.bedrock.aws/v1/chat/completions",
+            method="POST",
+            status_code=200,
+            content=sse_body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-model-retry": fake_route}),
+        patch(
+            "language_model_gateway.gateway.routers.model_routing.router._throttle_backoff",
+            return_value=0,
+        ),
+    ):
+        body = {
+            "model": "claude-test-model-retry",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        response = await client.post(
+            "/v1/messages",
+            json=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    # Initial attempt + _MAX_THROTTLE_RETRIES retries, all exhausted before
+    # finally giving up and surfacing the error.
+    assert len(httpx_mock.get_requests()) == _MAX_THROTTLE_RETRIES + 1
+
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_stream_error"
+    usage_tracker.record_usage_from_openai_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bedrock_mantle_connection_error_is_not_misrecorded_as_stream_error(
+    router_client_with_trackers: tuple[httpx.AsyncClient, MagicMock, MagicMock],
+    httpx_mock: HTTPXMock,
+) -> None:
+    """`openai.APIConnectionError` is a *subclass* of `openai.APIError`, but
+    unlike a genuine Bedrock Mantle mid-stream error body it carries no
+    `.code`/`.type`/`.param`/`.body` — those are always None on a transport
+    failure. It must be recorded with its own exception type (matching prior
+    behavior for any other unexpected exception), not misclassified as
+    `bedrock_stream_error` with a null-filled detail body."""
+    client, usage_tracker, error_tracker = router_client_with_trackers
+    fake_route = {
+        "claude_model": "claude-test-model-connerr",
+        "url": "https://example.bedrock.aws/v1/chat/completions",
+        "model": "qwen.qwen3-coder-next",
+        "auth": "passthrough",
+        "api_type": "openai",
+    }
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"))
+
+    with patch.dict(_ROUTES, {"claude-test-model-connerr": fake_route}):
+        body = {
+            "model": "claude-test-model-connerr",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        with pytest.raises(openai.APIConnectionError):
+            await client.post(
+                "/v1/messages",
+                json=body,
+                headers={"content-type": "application/json"},
+            )
+
+    await asyncio.sleep(0)  # let the fire-and-forget error-recording task run
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "APIConnectionError"
+    usage_tracker.record_usage_from_openai_response.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Native Bedrock Converse transport — non-streaming dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def native_bedrock_route() -> dict[str, Any]:
+    return {
+        "tier": "sonnet",
+        "claude_model": "claude-test-native-sonnet",
+        "url": "https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+        "model": "qwen.qwen3-coder-next",
+        "auth": "aws",
+        "aws_region": "us-east-1",
+        "api_type": "openai",
+        "price_per_mtok": 0.5,
+        "anthropic_price_per_mtok": 3.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_nonstreaming_happy_path(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """When bedrock_transport="native" and the route's auth is "aws", a
+    non-streaming request must go through the Converse API, not Mantle's
+    openai.AsyncOpenAI client."""
+    router = CodingModelRouter(bedrock_transport="native")
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse.return_value = {
+        "output": {"message": {"role": "assistant", "content": [{"text": "Hi there"}]}},
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 5,
+            "outputTokens": 3,
+            "totalTokens": 8,
+            "cacheReadInputTokens": 100,
+            "cacheWriteInputTokens": 20,
+        },
+    }
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            }
+            response = await client.post(
+                "/v1/messages",
+                json=body,
+                headers={"content-type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    resp_json = response.json()
+    assert resp_json["content"] == [{"type": "text", "text": "Hi there"}]
+    assert resp_json["stop_reason"] == "end_turn"
+    # Cache-token fields must reach the client — see
+    # anthropics/claude-code#13385 (clients derive context-window usage
+    # from these, and a missing field looks identical to "no caching").
+    assert resp_json["usage"]["cache_read_input_tokens"] == 100
+    assert resp_json["usage"]["cache_creation_input_tokens"] == 20
+    mock_client.converse.assert_called_once()
+    call_kwargs = mock_client.converse.call_args.kwargs
+    assert call_kwargs["modelId"] == "qwen.qwen3-coder-next"
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_mantle_default_transport_unaffected(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """With bedrock_transport left at its "mantle" default, an auth="aws"
+    route must still go through the openai SDK path — the native branch
+    must not be reachable without the explicit toggle."""
+    router = CodingModelRouter()  # default bedrock_transport="mantle"
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            }
+            # No httpx_mock response registered for the openai SDK's target
+            # URL, so this will fail to connect — that's fine, we're only
+            # asserting the native client was never touched.
+            try:
+                await client.post(
+                    "/v1/messages",
+                    json=body,
+                    headers={"content-type": "application/json"},
+                )
+            except Exception:
+                pass
+
+    mock_client.converse.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_nonstreaming_records_usage(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    router = CodingModelRouter(bedrock_transport="native")
+    usage_tracker = MagicMock()
+    usage_tracker.record_usage = AsyncMock()
+    router._usage_tracker = usage_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse.return_value = {
+        "output": {"message": {"role": "assistant", "content": [{"text": "Hi"}]}},
+        "stopReason": "end_turn",
+        "usage": {"inputTokens": 5, "outputTokens": 3, "totalTokens": 8},
+    }
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            }
+            await client.post(
+                "/v1/messages", json=body, headers={"content-type": "application/json"}
+            )
+
+    await asyncio.sleep(0)
+    usage_tracker.record_usage.assert_awaited_once()
+    call_kwargs = usage_tracker.record_usage.call_args.kwargs
+    assert call_kwargs["input_tokens"] == 5
+    assert call_kwargs["output_tokens"] == 3
+    assert call_kwargs["streaming"] is False
+    assert call_kwargs["raw_usage"] == {
+        "inputTokens": 5,
+        "outputTokens": 3,
+        "totalTokens": 8,
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_nonstreaming_client_error_is_recorded(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """A non-transient ClientError (e.g. ValidationException) must be
+    recorded via _record_error with error_type="bedrock_native_error" and
+    the AWS request ID from the ClientError response metadata."""
+    router = CodingModelRouter(bedrock_transport="native")
+    usage_tracker = MagicMock()
+    usage_tracker.record_usage = AsyncMock()
+    error_tracker = MagicMock()
+    error_tracker.record_error = AsyncMock()
+    router._usage_tracker = usage_tracker
+    router._error_tracker = error_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse.side_effect = ClientError(
+        {
+            "Error": {"Code": "ValidationException", "Message": "bad request"},
+            "ResponseMetadata": {
+                "RequestId": "aws-req-123",
+                "HTTPStatusCode": 400,
+                "HTTPHeaders": {},
+                "RetryAttempts": 0,
+                "HostId": "",
+            },
+        },
+        "Converse",
+    )
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            }
+            response = await client.post(
+                "/v1/messages", json=body, headers={"content-type": "application/json"}
+            )
+
+    assert response.status_code == 200  # errors surfaced as a 200 assistant message
+    await asyncio.sleep(0)
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_native_error"
+    recorded = json.loads(call_kwargs["error_message"])
+    assert recorded["code"] == "ValidationException"
+    assert recorded["request_id"] == "aws-req-123"
+
+
+# ---------------------------------------------------------------------------
+# Native Bedrock Converse transport — streaming dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_streaming_client_error_is_recorded(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """A non-transient ClientError (e.g. ValidationException) raised by
+    converse_stream() itself — before any streaming has started — must be
+    recorded via _record_error with error_type="bedrock_native_error" and
+    the AWS request ID from the ClientError response metadata. Mirrors
+    test_native_bedrock_nonstreaming_client_error_is_recorded for the
+    streaming dispatch (_dispatch_bedrock_native_streaming), which previously
+    had no direct test of its ClientError/credential-error handling — only
+    the mid-stream-after-connection-succeeds error path was covered."""
+    router = CodingModelRouter(bedrock_transport="native")
+    usage_tracker = MagicMock()
+    usage_tracker.record_usage = AsyncMock()
+    error_tracker = MagicMock()
+    error_tracker.record_error = AsyncMock()
+    router._usage_tracker = usage_tracker
+    router._error_tracker = error_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse_stream.side_effect = ClientError(
+        {
+            "Error": {"Code": "ValidationException", "Message": "bad request"},
+            "ResponseMetadata": {
+                "RequestId": "aws-req-456",
+                "HTTPStatusCode": 400,
+                "HTTPHeaders": {},
+                "RetryAttempts": 0,
+                "HostId": "",
+            },
+        },
+        "ConverseStream",
+    )
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            }
+            response = await client.post(
+                "/v1/messages", json=body, headers={"content-type": "application/json"}
+            )
+
+    assert response.status_code == 200  # errors surfaced as a 200 assistant message
+    await asyncio.sleep(0)
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_native_error"
+    recorded = json.loads(call_kwargs["error_message"])
+    assert recorded["code"] == "ValidationException"
+    assert recorded["request_id"] == "aws-req-456"
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_streaming_happy_path(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    router = CodingModelRouter(bedrock_transport="native")
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse_stream.return_value = {
+        "stream": iter(
+            [
+                {"messageStart": {"role": "assistant"}},
+                {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
+                {
+                    "contentBlockDelta": {
+                        "contentBlockIndex": 0,
+                        "delta": {"text": "Streamed hi"},
+                    }
+                },
+                {"contentBlockStop": {"contentBlockIndex": 0}},
+                {"messageStop": {"stopReason": "end_turn"}},
+                {
+                    "metadata": {
+                        "usage": {
+                            "inputTokens": 4,
+                            "outputTokens": 2,
+                            "cacheReadInputTokens": 100,
+                            "cacheWriteInputTokens": 20,
+                        }
+                    }
+                },
+            ]
+        )
+    }
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            }
+            response = await client.post(
+                "/v1/messages",
+                json=body,
+                headers={"content-type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    assert b"Streamed hi" in response.content
+    assert b"event: message_start" in response.content
+    assert b"event: message_stop" in response.content
+    # Cache-token fields must reach the client's message_delta event — see
+    # anthropics/claude-code#13385.
+    assert b'"cache_read_input_tokens": 100' in response.content
+    assert b'"cache_creation_input_tokens": 20' in response.content
+    mock_client.converse_stream.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_streaming_with_long_tool_name_restores_original(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """MCP-prefixed tool names (e.g. mcp__claude_ai_Intuit_QuickBooks__...)
+    routinely exceed Bedrock Converse's 64-character toolSpec.name limit.
+    Sending one un-shortened fails the whole request with a
+    ValidationException; the client must still see its original tool name
+    back in the tool_use block."""
+    long_name = "mcp__claude_ai_Intuit_QuickBooks__qbo_accounting_get_balance_sheet"
+    router = CodingModelRouter(bedrock_transport="native")
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+
+    def _capture_and_stream(**kwargs: Any) -> dict[str, Any]:
+        sent_name = kwargs["toolConfig"]["tools"][0]["toolSpec"]["name"]
+        assert len(sent_name) <= 64
+        return {
+            "stream": iter(
+                [
+                    {"messageStart": {"role": "assistant"}},
+                    {
+                        "contentBlockStart": {
+                            "contentBlockIndex": 0,
+                            "start": {
+                                "toolUse": {
+                                    "toolUseId": "tooluse_1",
+                                    "name": sent_name,
+                                }
+                            },
+                        }
+                    },
+                    {"contentBlockStop": {"contentBlockIndex": 0}},
+                    {"messageStop": {"stopReason": "tool_use"}},
+                    {"metadata": {"usage": {"inputTokens": 4, "outputTokens": 2}}},
+                ]
+            )
+        }
+
+    mock_client.converse_stream.side_effect = _capture_and_stream
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "What's my balance?"}],
+                "tools": [
+                    {
+                        "name": long_name,
+                        "description": "Get balance sheet",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
+                "stream": True,
+            }
+            response = await client.post(
+                "/v1/messages",
+                json=body,
+                headers={"content-type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    assert f'"name": "{long_name}"'.encode() in response.content
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_streaming_records_usage(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    router = CodingModelRouter(bedrock_transport="native")
+    usage_tracker = MagicMock()
+    usage_tracker.record_usage = AsyncMock()
+    router._usage_tracker = usage_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse_stream.return_value = {
+        "stream": iter(
+            [
+                {"messageStart": {"role": "assistant"}},
+                {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
+                {
+                    "contentBlockDelta": {
+                        "contentBlockIndex": 0,
+                        "delta": {"text": "hi"},
+                    }
+                },
+                {"contentBlockStop": {"contentBlockIndex": 0}},
+                {"messageStop": {"stopReason": "end_turn"}},
+                {"metadata": {"usage": {"inputTokens": 4, "outputTokens": 2}}},
+            ]
+        )
+    }
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            }
+            await client.post(
+                "/v1/messages", json=body, headers={"content-type": "application/json"}
+            )
+
+    await asyncio.sleep(0)
+    usage_tracker.record_usage.assert_awaited_once()
+    call_kwargs = usage_tracker.record_usage.call_args.kwargs
+    assert call_kwargs["input_tokens"] == 4
+    assert call_kwargs["output_tokens"] == 2
+    assert call_kwargs["streaming"] is True
+    assert call_kwargs["raw_usage"] == {"inputTokens": 4, "outputTokens": 2}
+
+
+@pytest.mark.asyncio
+async def test_native_bedrock_streaming_mid_stream_error_is_recorded(
+    native_bedrock_route: dict[str, Any],
+) -> None:
+    """A failure raised mid-iteration of converse_stream()'s EventStream
+    (after streaming has already started, so it can't become a clean
+    pre-first-chunk error response) must still reach model-router-errors —
+    mirroring test_bedrock_mantle_mid_stream_error_records_full_detail for
+    the Mantle path."""
+
+    def _raising_stream() -> Iterator[dict[str, Any]]:
+        yield {"messageStart": {"role": "assistant"}}
+        raise RuntimeError("native bedrock stream failed")
+
+    router = CodingModelRouter(bedrock_transport="native")
+    error_tracker = MagicMock()
+    error_tracker.record_error = AsyncMock()
+    router._error_tracker = error_tracker
+    app = FastAPI()
+    app.include_router(router.get_router())
+
+    mock_client = MagicMock()
+    mock_client.converse_stream.return_value = {"stream": _raising_stream()}
+
+    with (
+        patch.dict(_ROUTES, {"claude-test-native-sonnet": native_bedrock_route}),
+        patch.object(
+            BedrockRuntimeClientProvider, "get_client", return_value=mock_client
+        ),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            body = {
+                "model": "claude-test-native-sonnet",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            }
+            response = await client.post(
+                "/v1/messages", json=body, headers={"content-type": "application/json"}
+            )
+
+    assert response.status_code == 200
+    await asyncio.sleep(0)
+    error_tracker.record_error.assert_awaited_once()
+    call_kwargs = error_tracker.record_error.call_args.kwargs
+    assert call_kwargs["error_type"] == "bedrock_native_error"
+    assert "native bedrock stream failed" in call_kwargs["error_message"]

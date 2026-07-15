@@ -5,52 +5,52 @@ from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletionChunk, ChatCompletion
 from openai.types.chat.chat_completion import Choice
 
-from language_model_gateway.configs.config_schema import (
+from languagemodelcommon.configs.schemas.config_schema import (
     ChatModelConfig,
     ModelConfig,
     AgentConfig,
 )
-from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
-    ConfigExpiringCache,
-)
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
-from language_model_gateway.gateway.image_generation.image_generator_factory import (
+from tests.common import set_model_configs
+from languagemodelcommon.image_generation.image_generator_factory import (
     ImageGeneratorFactory,
 )
-from language_model_gateway.gateway.models.model_factory import ModelFactory
+from languagemodelcommon.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
 from tests.gateway.mocks.mock_chat_model import MockChatModel
-from tests.gateway.mocks.mock_image_generator import MockImageGenerator
-from tests.gateway.mocks.mock_image_generator_factory import MockImageGeneratorFactory
+from languagemodelcommon.mocks.mock_image_generator import MockImageGenerator
+from languagemodelcommon.mocks.mock_image_generator_factory import (
+    MockImageGeneratorFactory,
+)
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from simple_container.container.interfaces import IContainer
 
 
-async def test_chat_openai_image_generator(async_client: httpx.AsyncClient) -> None:
+async def test_chat_openai_image_generator(
+    async_client: httpx.AsyncClient, test_container: IContainer
+) -> None:
     print("")
-    test_container: SimpleContainer = await get_container_async()
 
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
-                    fn_get_response=lambda messages: "http://localhost:5050/image_generation/"
+                    fn_get_response=lambda messages: (
+                        "http://localhost:5050/image_generation/"
+                    )
                 )
             ),
         )
-        test_container.register(
+        test_container.singleton(
             ImageGeneratorFactory,
             lambda c: MockImageGeneratorFactory(image_generator=MockImageGenerator()),
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="general_purpose",
@@ -65,7 +65,7 @@ async def test_chat_openai_image_generator(async_client: httpx.AsyncClient) -> N
                     AgentConfig(name="image_generator_openai"),
                 ],
             )
-        ]
+        ],
     )
 
     # Test health endpoint
@@ -105,30 +105,29 @@ async def test_chat_openai_image_generator(async_client: httpx.AsyncClient) -> N
 
 
 async def test_chat_anthropic_image_generator_streaming(
-    async_client: httpx.AsyncClient,
+    async_client: httpx.AsyncClient, test_container: IContainer
 ) -> None:
     print("")
-    test_container: SimpleContainer = await get_container_async()
 
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
-                    fn_get_response=lambda messages: "http://localhost:5050/image_generation/"
+                    fn_get_response=lambda messages: (
+                        "http://localhost:5050/image_generation/"
+                    )
                 )
             ),
         )
-        test_container.register(
+        test_container.singleton(
             ImageGeneratorFactory,
             lambda c: MockImageGeneratorFactory(image_generator=MockImageGenerator()),
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="general_purpose",
@@ -143,7 +142,7 @@ async def test_chat_anthropic_image_generator_streaming(
                     AgentConfig(name="image_generator_openai"),
                 ],
             )
-        ]
+        ],
     )
 
     # init client and connect to localhost server

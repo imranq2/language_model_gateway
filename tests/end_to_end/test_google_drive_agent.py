@@ -6,9 +6,12 @@ import mcp
 from fastmcp.client import StreamableHttpTransport
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from langchain_core.messages import BaseMessage, HumanMessage
+from languagemodelcommon.mcp.mcp_client.langchain_adapter import (
+    mcp_tool_to_langchain_tool,
+)
+from languagemodelcommon.mcp.mcp_client.session import create_mcp_session
+from languagemodelcommon.mcp.mcp_client.tool_list_cache import list_all_tools
 from langgraph.graph import StateGraph, MessagesState, START
 from langgraph.prebuilt import tools_condition
 from mcp.types import (
@@ -22,10 +25,11 @@ from mcp.types import (
     EmbeddedResource,
 )
 
-from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
-    ConfigExpiringCache,
-)
-from language_model_gateway.gateway.converters.streaming_tool_node import (
+from oidcauthlib.auth.models.token import Token
+
+from languagemodelcommon.state.messages_state import MyMessagesState
+from tests.common import set_model_configs
+from languagemodelcommon.converters.streaming_tool_node import (
     StreamingToolNode,
 )
 from fastmcp import Client
@@ -39,20 +43,19 @@ import pytest
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionUserMessageParam
 
-from language_model_gateway.configs.config_schema import (
+from languagemodelcommon.configs.schemas.config_schema import (
     ChatModelConfig,
     ModelConfig,
     AgentConfig,
 )
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
-from language_model_gateway.gateway.models.model_factory import ModelFactory
+from languagemodelcommon.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
 from tests.auth.keycloak_helper import KeyCloakHelper
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from simple_container.container.interfaces import IContainer
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +66,15 @@ logger = logging.getLogger(__name__)
 )
 async def test_google_drive_mcp_agent_directly() -> None:
     # HTTP server
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = await KeyCloakHelper.get_keycloak_access_token_async(
         username="tester", password="password"
     )
-    access_token = access_token_result["access_token"]
+    assert access_token is not None
     logger.info(f"Access Token: {access_token}")
 
     url: str = "http://mcp_server_gateway:5000/google_drive/"
     transport: StreamableHttpTransport = StreamableHttpTransport(
-        url=url, auth=access_token
+        url=url, auth=access_token.token
     )
 
     async def log_handler(message: LogMessage) -> None:
@@ -132,40 +135,41 @@ async def test_google_drive_via_llm() -> None:
     verify_aws_boto3_authentication()
     # model: BaseChatModel = init_chat_model("openai:gpt-4.1")
     model_parameters_dict: Dict[str, Any] = {}
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = await KeyCloakHelper.get_keycloak_access_token_async(
         username="tester", password="password"
     )
+    assert access_token is not None
     url: str = "http://mcp_server_gateway:5000/google_drive"
-    access_token = access_token_result["access_token"]
 
     model: BaseChatModel = ChatBedrockConverse(
         client=None,
-        # model="us.anthropic.claude-sonnet-4-20250514-v1:0",
-        model="us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        # model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+        model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
         provider="anthropic",
         credentials_profile_name=os.environ.get("AWS_CREDENTIALS_PROFILE"),
         region_name=os.environ.get("AWS_REGION", "us-east-1"),
         # Setting temperature to 0 for deterministic results
         **model_parameters_dict,
     )
-    mcp_tool_config: StreamableHttpConnection = {
+    mcp_tool_config: Any = {
         "url": url,
         "transport": "streamable_http",
-        # specify the http client factory to use the headers
-        # httpx_client_factory
-        # and/or bearer "auth"# auth: NotRequired[httpx.Auth]
         "headers": {
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {access_token.token}",
             "Content-Type": "application/json",
         },
     }
 
-    client = MultiServerMCPClient(
-        {
-            "download_file_from_url": mcp_tool_config,
-        }
-    )
-    tools = await client.get_tools()
+    tools: list[Any] = []
+    async with create_mcp_session(mcp_tool_config) as session:
+        await session.initialize()
+        mcp_tools = await list_all_tools(session)
+        tools.extend(
+            mcp_tool_to_langchain_tool(
+                t, connection=mcp_tool_config, server_name="download_file_from_url"
+            )
+            for t in mcp_tools
+        )
 
     def call_model(state: MessagesState) -> Dict[str, BaseMessage]:
         response = model.bind_tools(tools).invoke(state["messages"])
@@ -181,11 +185,23 @@ async def test_google_drive_via_llm() -> None:
     )
     builder.add_edge("tools", "call_model")
     graph = builder.compile()
-    prompt = {
-        "messages": "show me contents of this file: https://docs.google.com/document/d/15uw9_mdTON6SQpQHCEgCffVtYBg9woVjvcMErXQSaa0/edit?usp=sharing"
-    }
-    # noinspection PyTypeChecker
-    math_response = await graph.ainvoke(prompt)  # type: ignore[arg-type]
+    prompt: MyMessagesState = MyMessagesState(
+        messages=[
+            HumanMessage(
+                content=(
+                    "show me contents of this file: "
+                    "https://docs.google.com/document/d/15uw9_mdTON6SQpQHCEgCffVtYBg9woVjvcMErXQSaa0/edit?usp=sharing"
+                )
+            )
+        ],
+        usage_metadata=None,
+        user_id=None,
+        auth_token=None,
+        conversation_thread_id=None,
+        evaluation_notes=None,
+        passed_evaluation=None,
+    )
+    math_response = await graph.ainvoke(prompt)
     print(math_response)
     print("=== Google Drive Response ===")
     print(math_response["messages"][-1].content)
@@ -232,22 +248,23 @@ def verify_aws_boto3_authentication() -> None:
     reason="Environment Variable RUN_TESTS_WITH_REAL_LLM not set",
 )
 async def test_chat_completions_with_google_drive(
-    async_client: httpx.AsyncClient,
+    async_client: httpx.AsyncClient, test_container: IContainer
 ) -> None:
     print("")
-    access_token_result: Dict[str, str] = KeyCloakHelper.get_keycloak_access_token(
+    access_token: Token | None = await KeyCloakHelper.get_keycloak_access_token_async(
         username="tester", password="password"
     )
+    assert access_token is not None
     url: str = "http://mcp_server_gateway:5000/google_drive"
-    access_token = access_token_result["access_token"]
 
-    test_container: SimpleContainer = await get_container_async()
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
-                    fn_get_response=lambda messages: "Hello, this is a test file shared with all of b.well"
+                    fn_get_response=lambda messages: (
+                        "Hello, this is a test file shared with all of b.well"
+                    )
                 )
             ),
         )
@@ -255,10 +272,8 @@ async def test_chat_completions_with_google_drive(
         verify_aws_boto3_authentication()
 
     # set the model configuration for this test
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="google_drive",
@@ -275,7 +290,7 @@ async def test_chat_completions_with_google_drive(
                     ),
                 ],
             )
-        ]
+        ],
     )
 
     # init client and connect to localhost server
@@ -294,7 +309,7 @@ async def test_chat_completions_with_google_drive(
         messages=[message],
         model="Google Drive",
         extra_headers={
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {access_token.token}",
         },
     )
 

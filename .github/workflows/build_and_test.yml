@@ -8,6 +8,11 @@ on:
   pull_request:
     branches: [ main ]
 
+# Prevent duplicate runs on the same ref and cancel in-progress on PR updates to save CI minutes
+concurrency:
+  group: build-and-test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  
 jobs:
   build_and_test:
     # The type of runner that the job will run on
@@ -15,8 +20,8 @@ jobs:
 
     steps:
       # Checks-out your repository
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -29,9 +34,9 @@ jobs:
 #        id: login-ecr
 #        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: create docker.env
+      - name: create .env
         run: |
-          touch ${{ github.workspace }}/docker.env
+          touch ${{ github.workspace }}/.env
 
       - name: pre-commit
         run: make run-pre-commit && make clean-pre-commit
@@ -59,7 +64,7 @@ jobs:
           docker compose run --rm --name language_model_gateway_tests -v ${{ github.workspace }}/reports:/reports language-model-gateway pytest . --tb=auto --junitxml=/reports/test-results.xml
 
       - name: Upload pytest test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pytest-results
           path: ${{ github.workspace }}/reports/**/*.xml

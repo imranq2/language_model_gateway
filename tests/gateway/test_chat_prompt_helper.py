@@ -4,32 +4,29 @@ import httpx
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
-from language_model_gateway.configs.config_schema import (
+from languagemodelcommon.configs.schemas.config_schema import (
     ChatModelConfig,
     ModelConfig,
     PromptConfig,
     ModelParameterConfig,
 )
-from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
-    ConfigExpiringCache,
-)
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
-from language_model_gateway.gateway.models.model_factory import ModelFactory
+from tests.common import set_model_configs
+from languagemodelcommon.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from simple_container.container.interfaces import IContainer
 
 
-async def test_chat_prompt_helper(async_client: httpx.AsyncClient) -> None:
+async def test_chat_prompt_helper(
+    async_client: httpx.AsyncClient, test_container: IContainer
+) -> None:
     print("")
 
-    test_container: SimpleContainer = await get_container_async()
-
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
@@ -38,10 +35,8 @@ async def test_chat_prompt_helper(async_client: httpx.AsyncClient) -> None:
             ),
         )
 
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="prompt_helper",
@@ -69,7 +64,7 @@ async def test_chat_prompt_helper(async_client: httpx.AsyncClient) -> None:
                 #     )
                 # ]
             )
-        ]
+        ],
     )
 
     # init client and connect to localhost server
@@ -100,13 +95,13 @@ async def test_chat_prompt_helper(async_client: httpx.AsyncClient) -> None:
     assert "doctor" in content
 
 
-async def test_chat_prompt_helper_streaming(async_client: httpx.AsyncClient) -> None:
+async def test_chat_prompt_helper_streaming(
+    async_client: httpx.AsyncClient, test_container: IContainer
+) -> None:
     print("")
 
-    test_container: SimpleContainer = await get_container_async()
-
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
@@ -115,10 +110,8 @@ async def test_chat_prompt_helper_streaming(async_client: httpx.AsyncClient) -> 
             ),
         )
 
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="prompt_helper",
@@ -146,7 +139,7 @@ async def test_chat_prompt_helper_streaming(async_client: httpx.AsyncClient) -> 
                 #     )
                 # ]
             )
-        ]
+        ],
     )
 
     # init client and connect to localhost server

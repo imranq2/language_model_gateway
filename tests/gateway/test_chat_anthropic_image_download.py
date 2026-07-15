@@ -4,28 +4,30 @@ from pathlib import Path
 import httpx
 import pytest
 
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
-from language_model_gateway.gateway.image_generation.image_generator_factory import (
+from languagemodelcommon.image_generation.image_generator_factory import (
     ImageGeneratorFactory,
 )
-from language_model_gateway.gateway.models.model_factory import ModelFactory
+from languagemodelcommon.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
 from tests.gateway.mocks.mock_chat_model import MockChatModel
-from tests.gateway.mocks.mock_image_generator import MockImageGenerator
-from tests.gateway.mocks.mock_image_generator_factory import MockImageGeneratorFactory
+from languagemodelcommon.mocks.mock_image_generator import MockImageGenerator
+from languagemodelcommon.mocks.mock_image_generator_factory import (
+    MockImageGeneratorFactory,
+)
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from simple_container.container.interfaces import IContainer
 
 
 @pytest.mark.asyncio
-async def test_chat_anthropic_image_download(async_client: httpx.AsyncClient) -> None:
+async def test_chat_anthropic_image_download(
+    async_client: httpx.AsyncClient, test_container: IContainer
+) -> None:
     print("")
 
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container: SimpleContainer = await get_container_async()
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
@@ -33,7 +35,7 @@ async def test_chat_anthropic_image_download(async_client: httpx.AsyncClient) ->
                 )
             ),
         )
-        test_container.register(
+        test_container.singleton(
             ImageGeneratorFactory,
             lambda c: MockImageGeneratorFactory(image_generator=MockImageGenerator()),
         )
@@ -51,5 +53,5 @@ async def test_chat_anthropic_image_download(async_client: httpx.AsyncClient) ->
     )
 
     # call API
-    assert response.status_code == 200
+    assert response.status_code == 200, f"Response content: {response.content!r}"
     assert response.content == b"image content"

@@ -1,15 +1,22 @@
+from __future__ import annotations
+
 import logging
-import os
-from typing import Type, Literal, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Type, Literal, Tuple, Optional, override
 
 import httpx
 from httpx import Headers
-from pydantic import BaseModel, Field
-
-from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
-from language_model_gateway.gateway.utilities.html_to_markdown_converter import (
+from languagemodelcommon.markdown.html_to_markdown_converter import (
     HtmlToMarkdownConverter,
 )
+from pydantic import BaseModel, Field, PrivateAttr
+
+from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+
+if TYPE_CHECKING:
+    from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+        LanguageModelGatewayEnvironmentVariables,
+    )
+
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
@@ -36,7 +43,19 @@ class URLToMarkdownTool(ResilientBaseTool):
     )
     args_schema: Type[BaseModel] = URLToMarkdownToolInput
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
+    _environment_variables: LanguageModelGatewayEnvironmentVariables | None = (
+        PrivateAttr(default=None)
+    )
 
+    def __init__(
+        self,
+        environment_variables: LanguageModelGatewayEnvironmentVariables | None = None,
+        **data: Any,
+    ) -> None:
+        super().__init__(**data)
+        self._environment_variables = environment_variables
+
+    @override
     def _run(
         self, url: str, use_verbose_logging: Optional[bool] = None
     ) -> Tuple[str, str]:
@@ -47,6 +66,7 @@ class URLToMarkdownTool(ResilientBaseTool):
         """
         raise NotImplementedError("Use async version of this tool")
 
+    @override
     async def _arun(
         self, url: str, use_verbose_logging: Optional[bool] = None
     ) -> Tuple[str, str]:
@@ -74,7 +94,10 @@ class URLToMarkdownTool(ResilientBaseTool):
             content: str = await HtmlToMarkdownConverter.get_markdown_from_html_async(
                 html_content=html_content
             )
-            if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+            if (
+                self._environment_variables
+                and self._environment_variables.log_input_and_output
+            ):
                 logger.info(
                     f"====== Scraped {url} ======\n{content}\n====== End of Scraped Markdown ======"
                 )

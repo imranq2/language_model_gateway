@@ -7,94 +7,209 @@ services:
     container_name: language-model-gateway
     environment:
       DEBUG_METRICS: 0
-      DD_TRACE_ENABLED: "false"
       LOG_LEVEL: INFO
+      MCP_LOG_LEVEL: DEBUG
+      LLM_LOG_LEVEL: DEBUG
+      HTTP_LOG_LEVEL: DEBUG
+      HTTP_TRACING_LOG_LEVEL: DEBUG
+      LOG_ALL_REQUESTS: 1
       AGENT_URL: 'http://host.docker.internal:5055/api/v1'
       OPENAI_AGENT_URL: 'http://host.docker.internal:5055/api/v1'
       DEFAULT_PATIENT_ID: "eEooRVLYdWIW753OhZUd1dgxQRny4KCo6fiH-13lY0043"
 #      DEFAULT_WEB_SEARCH_TOOL: "duckduckgo_search"
       DEFAULT_WEB_SEARCH_TOOL: "google_search"
-      IMAGE_GENERATION_PATH: "/usr/src/language_model_gateway/image_generation"
+      IMAGE_GENERATION_PATH: "/usr/src/tool_outputs"
 #      IMAGE_GENERATION_PATH: "s3://bwell-dev-data-science-ue1/openwebui/image_generation/"
 #      IMAGE_GENERATION_PATH: "s3://bwell-services-data-science-ue1/openwebui/image_generation/"
       IMAGE_GENERATION_URL: "http://localhost:5050/image_generation"
-      MODELS_OFFICIAL_PATH: "/usr/src/language_model_gateway/language_model_gateway/configs/chat_completions/official"
-      MODELS_TESTING_PATH: "/usr/src/language_model_gateway/language_model_gateway/configs/chat_completions/testing"
-#      MODELS_ZIP_PATH: "https://github.com/icanbwell/language-model-gateway-configuration/zipball/main/"
-#      MODELS_OFFICIAL_PATH: "configs/chat_completions/official"
-#      MODELS_TESTING_PATH: "configs/chat_completions/testing"
-#      MODELS_OFFICIAL_PATH: "https://github.com/icanbwell/language-model-gateway-configuration/tree/main/configs/chat_completions/official"
-#      MODELS_TESTING_PATH: "https://github.com/icanbwell/language-model-gateway-configuration/tree/main/configs/chat_completions/testing"
-      MODELS_PATH_BACKUP: "/usr/src/language_model_gateway/language_model_gateway/configs/chat_completions"
-      CONFIG_CACHE_TIMEOUT_SECONDS: 120
+      MCP_SERVER_GATEWAY_URL: "http://mcp_server_gateway:5000"
+#      MCP_SERVER_GATEWAY_URL: "https://mcp-server-gateway.services.bwell.zone"
+      # ====  Uncomment this to read from github ====
+#      GITHUB_CONFIG_REPO_URL: "https://api.github.com/repos/icanbwell/language-model-gateway-configuration/zipball/main"
+#      GITHUB_CACHE_FOLDER: "/usr/src/language_model_gateway/github_config_cache/{pid}"
+#      MODELS_OFFICIAL_PATH: "/usr/src/language_model_gateway/github_config_cache/{pid}/configs/chat_completions/official"
+#      MODELS_TESTING_PATH: "/usr/src/language_model_gateway/github_config_cache/{pid}/configs/chat_completions/testing"
+#      PROMPT_LIBRARY_PATH: "/usr/src/language_model_gateway/github_config_cache/{pid}/configs/chat_completions/prompts"
+      # ====  End Uncomment this to read from github  =======
+      # ====  Uncomment this to read from local folders ====
+      # Local paths within the cache folder (populated by GITHUB_CONFIG_REPO_URL download)
+      GITHUB_CACHE_FOLDER: "/usr/src/language_model_gateway/github_config_cache"
+      MODELS_OFFICIAL_PATH: "/usr/src/language_model_gateway/github_config_cache/configs/chat_completions/official"
+      MODELS_TESTING_PATH: "/usr/src/language_model_gateway/github_config_cache/configs/chat_completions/testing"
+      PROMPT_LIBRARY_PATH: "/usr/src/language_model_gateway/github_config_cache/configs/chat_completions/prompts"
+      # ====  End Uncomment this to read from local folders  =======
+      # path to provider search
       PROVIDER_SEARCH_API_URL: "https://provider-search.prod.icanbwell.com/graphql"
       # Number of worker process to run
       NUM_WORKERS: 1
       AWS_REGION: 'us-east-1'
       HELP_KEYWORDS: "help;/help;aid"
-      LOG_INPUT_AND_OUTPUT: 1
-      RETURN_RAW_TOOL_OUTPUT: 1
+      LOG_INPUT_AND_OUTPUT: 0
+      RETURN_RAW_TOOL_OUTPUT: 0
+      # Local-debug only: logs raw Authorization tokens received on /v1/messages
+      # (CodingModelRouter) at WARNING level. Never enable outside local dev.
+      DEBUG_LOG_RECEIVED_OAUTH_TOKENS: 1
       DEFAULT_MODEL_PROVIDER: "bedrock"
-      DEFAULT_MODEL_NAME: "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+      DEFAULT_MODEL_NAME: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      # Enable cost savings info in responses (appends token usage info to model output)
+      ENABLE_COST_SAVINGS_INFO: "false"
       GITHUB_ORGANIZATION_NAME: "icanbwell"
       GITHUB_MAXIMUM_REPOS: "100"
       GITHUB_MAXIMUM_PULL_REQUESTS_PER_REPO: "100"
       JIRA_BASE_URL: "https://icanbwell.atlassian.net"
-#      JIRA_USERNAME: "imran.qureshi@icanbwell.com"
+#      JIRA_USERNAME: "imran.qureshi@bwell.com"
       JIRA_MAXIMUM_PROJECTS: "100"
       JIRA_MAXIMUM_ISSUES_PER_PROJECT: "100"
-      MCP_TOOLS_METADATA_CACHE_TIMEOUT_SECONDS: 30
-      # These define the connection to the identity provider for JWT validation
-      # This lists the audiences that are allowed to access the API
-      # Below we specify the client id, client secret and well-known URI for each client
-      AUTH_PROVIDERS: "client1,client3,okta"
+      # Inbound auth providers for JWT validation of gateway callers.
+      # Outbound providers (for MCP servers and models) are defined inline
+      # in .mcp.json mcpServers[x].oauth and model config oauth_providers.
+      AUTH_PROVIDERS: "client1,client3,oktaaiden,cognitostaging"
       # first client for testing
       AUTH_ISSUER_CLIENT1: "http://keycloak:8080/realms/bwell-realm"
       AUTH_AUDIENCE_CLIENT1: "client1"
+      AUTH_FRIENDLY_NAME_CLIENT1: "Keycloak BWell Realm"
       AUTH_CLIENT_ID_CLIENT1: "bwell-client-id"
       AUTH_CLIENT_SECRET_CLIENT1: "bwell-secret"
       AUTH_WELL_KNOWN_URI_CLIENT1: "http://keycloak:8080/realms/bwell-realm/.well-known/openid-configuration"
+      AUTH_SCOPE_CLIENT1: "openid email profile"
       # second client for testing
       AUTH_ISSUER_CLIENT3: "http://keycloak:8080/realms/bwell-realm"
       AUTH_AUDIENCE_CLIENT3: "client3"
+      AUTH_FRIENDLY_NAME_CLIENT3: "Keycloak BWell Realm Client 3"
       AUTH_CLIENT_ID_CLIENT3: "bwell-client-id-3"
       AUTH_CLIENT_SECRET_CLIENT3: "bwell-secret-3"
       AUTH_WELL_KNOWN_URI_CLIENT3: "http://keycloak:8080/realms/bwell-realm/.well-known/openid-configuration"
-      # Okta for dev and production
-      AUTH_ISSUER_OKTA: "https://icanbwell.okta.com"
-      # AUTH_CLIENT_ID_OKTA and AUTH_CLIENT_SECRET_OKTA are read from the docker.env file
-      AUTH_WELL_KNOWN_URI_OKTA: "https://icanbwell.okta.com/.well-known/openid-configuration"
+      # Okta for corporate access
+      AUTH_ISSUER_OKTAAIDEN: "https://icanbwell.okta.com"
+      AUTH_AUDIENCE_OKTAAIDEN: "https://icanbwell.okta.com"
+      AUTH_FRIENDLY_NAME_OKTAAIDEN: "Okta b.well"
+      AUTH_CLIENT_ID_OKTAAIDEN: "0oa11g45c90Fqbgzz698"
+      AUTH_WELL_KNOWN_URI_OKTAAIDEN: "https://icanbwell.okta.com/.well-known/openid-configuration"
+      AUTH_SCOPE_OKTAAIDEN: "openid email profile groups"
       # This is the URL that the user will be redirected to after authentication
       AUTH_REDIRECT_URI: "http://localhost:5050/auth/callback"
+      APP_LOGIN_URI: "http://localhost:5050/app/login"
+      APP_TOKEN_SAVE_URI: "http://localhost:5050/app/token"
+      # ── COGNITO_STAGING ─────────────────────────────────────────────
+      AUTH_ISSUER_COGNITOSTAGING: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_zzOfrTtVr"
+      AUTH_AUDIENCE_COGNITOSTAGING: "5bmd3qdmcgn9f5nbvbhdqh14pb"
+      AUTH_CLIENT_ID_COGNITOSTAGING: "5bmd3qdmcgn9f5nbvbhdqh14pb"
+      AUTH_WELL_KNOWN_URI_COGNITOSTAGING: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_zzOfrTtVr/.well-known/openid-configuration"
       # Mongo DB settings for storing tokens
       MONGO_DB_NAME: language_model_gateway
-      MONGO_URL: 'mongodb://mongo:27017?appName=fhir-server'
-      MONGO_DB_USERNAME: root
-      MONGO_DB_PASSWORD: "test123"  # pragma: allowlist secret
+      MONGO_URL: ${LANGUAGE_MODEL_GATEWAY_MONGO_URL-mongodb://mongo:27017?appName=fhir-server}
+      MONGO_DB_USERNAME: ${LANGUAGE_MODEL_GATEWAY_MONGO_USERNAME:-root}
+      MONGO_DB_PASSWORD: ${LANGUAGE_MODEL_GATEWAY_MONGO_PASSWORD:-test123}  # pragma: allowlist secret
       MONGO_DB_AUTH_CACHE_COLLECTION_NAME: oauth_cache
-      MONGO_DB_AUTH_CACHE_DISABLE_DELETE: 'true'
+#      MONGO_DB_AUTH_CACHE_DISABLE_DELETE: 'true'
       MONGO_DB_TOKEN_COLLECTION_NAME: tokens
-      # for LLM memory
-      ENABLE_LLM_MEMORY: 'false'
+      MONGO_DB_DCR_COLLECTION_NAME: dcr_registrations
+      OAUTH_CACHE: mongo
+      # ── Caching ─────────────────────────────────────────────────────
+      #
+      # CONFIG_CACHE_TIMEOUT_SECONDS: TTL (seconds) for the in-memory
+      #   config cache and the snapshot cache write.
+      #
+      # MCP_TOOLS_METADATA_CACHE_TIMEOUT_SECONDS: TTL (seconds) for
+      #   cached MCP tool metadata (default: 3600).
+      #
+      # Snapshot cache — stores only the parsed ChatModelConfig list
+      # (model definitions from MODELS_OFFICIAL_PATH). Lets restarts
+      # and new Gunicorn workers load model configs from the cache
+      # instead of re-reading every file from disk or GitHub.
+      #
+      # SNAPSHOT_CACHE_TYPE: Backend type.
+      #   'mongo'  — persists to MongoDB. Uses MONGO_LLM_STORAGE_* vars
+      #              (falls back to MONGO_URL / MONGO_DB_USERNAME /
+      #              MONGO_DB_PASSWORD when the LLM-specific vars are unset).
+      #   'file'   — persists to a local JSON file at
+      #              /tmp/snapshot_cache/<collection>.json.
+      #              Survives restarts if the path is on a mounted volume.
+      #   'memory' — in-process only. Lost on restart. No MongoDB needed.
+      #
+      # SNAPSHOT_CACHE_COLLECTION_NAME: Mongo collection or file namespace
+      #   (default: 'snapshot_cache').
+      #
+      # Per-resource collection overrides (optional):
+      #   SNAPSHOT_CACHE_MODEL_CONFIGS_COLLECTION — separate collection for
+      #     ChatModelConfig snapshots (ConfigReader).
+      #   When unset, each loader uses the store's default collection.
+      # ────────────────────────────────────────────────────────────────
+      CONFIG_CACHE_TIMEOUT_SECONDS: 10
+      CONFIG_REFRESH_INTERVAL_MINUTES: 60
+      MCP_TOOLS_METADATA_CACHE_TIMEOUT_SECONDS: 30
+      SNAPSHOT_CACHE_TYPE: ${SNAPSHOT_CACHE_TYPE:-mongo}
+      SNAPSHOT_CACHE_TTL_SECONDS: 3600
+      SNAPSHOT_CACHE_COLLECTION_NAME: snapshot_cache
+#      SNAPSHOT_CACHE_MODEL_CONFIGS_COLLECTION: model_configs_snapshot
+      # ── LLM storage & snapshot cache MongoDB ──────────────────────
+      # All use MONGO_LLM_STORAGE_* vars, which fall back to
+      # MONGO_URL / MONGO_DB_USERNAME / MONGO_DB_PASSWORD when unset.
+      MONGO_LLM_STORAGE_DB_NAME: language_model_gateway
+      LLM_STORAGE_TYPE: "mongo"
+      ENABLE_LLM_STORE: 'true'
+      ENABLE_LLM_CHECKPOINTER: 'true'
+      ENABLE_LLM_MEMORY: 'true'
       MONGO_LLM_STORAGE_STORE_COLLECTION_NAME: "stores"
       MONGO_LLM_STORAGE_CHECKPOINTER_COLLECTION_NAME: "checkpointers"
-      LLM_STORAGE_TYPE: "mongo"
-      OAUTH_CACHE: mongo
+      # Local-dev only: captures truncated prompt/response text on
+      # model-router-usage records. Off by default in deployed environments
+      # since this persists user/model content, not just metadata.
+      MODEL_ROUTING_USAGE_CAPTURE_PREVIEWS: "true"
       # This is the user and password that can be used for testing
       MY_USER_NAME: tester
       MY_USER_PASSWORD: password
       # truncates the tool output to the specified number of tokens
       TOOL_OUTPUT_TOKEN_LIMIT: 100000
-      # Control logging by code area
-      HTTP_TRACING_LOG_LEVEL: 'DEBUG'
-    env_file: docker.env
-    command: ["uvicorn", "language_model_gateway.gateway.api:app", "--host", "0.0.0.0", "--port", "5000", "--reload", "--log-level", "debug"]
+      # configures retry behavior for AWS SDK calls
+      AWS_BEDROCK_MAX_RETRIES: '1'
+      AWS_BEDROCK_RETRY_MODE: 'standard'
+      # determines when to return tool outputs in responses
+      MAXIMUM_INLINE_TOOL_OUTPUT_SIZE: '100'
+      # wait time for tool calls before timing out (in seconds)
+      TOOL_CALL_TIMEOUT_SECONDS: '600'
+      OPEN_TELEMETRY_LOG_LEVEL: 'DEBUG'
+      WRITE_TOOL_OUTPUT_TO_FILE: 1
+      AWS_BEDROCK_READ_TIMEOUT_SECONDS: 1200
+      STREAMING_BUFFER_FLUSH_INTERVAL_SECONDS: 1
+      LANGGRAPH_RECURSION_LIMIT: 100
+      ENABLE_STREAMING_BUFFERING: 0
+      AIDEN_OAUTH_CLIENT_NAME: "b.well Aiden Local"
+      # Allow http:// URLs for local OIDC providers (e.g. keycloak in Docker)
+      AUTH_ALLOW_HTTP_URLS: "true"
+    env_file: .env
+    command:
+      - opentelemetry-instrument
+      - gunicorn
+      - --reload
+      - language_model_gateway.gateway.api:app
+      - --workers=1
+      - --worker-class
+      - uvicorn.workers.UvicornWorker
+      - --bind
+      - 0.0.0.0:5000
+      - --timeout=660
+      - --keep-alive=45
+      - --graceful-timeout=660
+      - --log-level
+      - info
     ports:
       - '5050:5000'
     volumes:
     - ./:/usr/src/language_model_gateway/:cached
-      # uncomment this for testing AWS models and the docker.env above (need the AWS_CREDENTIALS_PROFILE env var)
+    # uncomment the below to get configs from local folders instead of github (also unset GITHUB_CONFIG_REPO_URL)
+    - ./language-model-gateway-configs/chat_completions:/usr/src/language_model_gateway/github_config_cache/configs/chat_completions
+    # uncomment the below and comment the above to get configs from a mounted folder instead of github (also unset GITHUB_CONFIG_REPO_URL)
+#    - ../language-model-gateway-configuration/configs/chat_completions:/usr/src/language_model_gateway/github_config_cache/configs/chat_completions
+    - ./outputs/tools:/usr/src/tool_outputs
+    # mount cache
+#    - ./caches/pip:/etc/appuser/.cache/pip
+#    - ./caches/virtualenvs:/etc/appuser/.local/share/virtualenvs
+      # uncomment this for testing AWS models and the .env above (need the AWS_CREDENTIALS_PROFILE env var)
     - ~/.aws/:/etc/appuser/.aws/
+    # uncomment the below to get the code from local folders instead of pypi
+#    - ../oidc-auth-lib/oidcauthlib:/opt/venv/lib/python3.12/site-packages/oidcauthlib:ro
+#    - ../language-model-common/languagemodelcommon:/opt/venv/lib/python3.12/site-packages/languagemodelcommon:ro
     healthcheck:
       test: curl --fail -s http://localhost:5000/health || exit 1
       interval: 10s
@@ -103,25 +218,7 @@ services:
     networks:
       - web
 
-  mongo:
-    image: mongodb/mongodb-atlas-local:8.2.0
-    # https://github.com/mongodb/mongodb-atlas-cli/releases
-    # https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-changelog/
-    ports:
-      - "27017:27017"
-    container_name: mongo
-    environment:
-      #      ALLOW_EMPTY_PASSWORD: yes
-      MONGO_VECTOR_DATABASE: data-science
-      MONGO_VECTOR_COLLECTION: complaints_cache
-      MONGODB_INITDB_ROOT_USERNAME: root
-      MONGODB_INITDB_ROOT_PASSWORD: "test123" # pragma: allowlist secret
-      MONGO_VECTOR_PORT: 27017
-      MONGO_EMBEDDINGS_CACHE_COLLECTION: embeddings_cache
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh mongo:27017/test --quiet
-    networks:
-      - web
 networks:
   web:
-    driver: bridge
+    external: true
+    name: language-model-gateway_web

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/imranq2/language_model_gateway/main/language_model_gateway/configs/config_schema.json",
+  "id": "ai_sdk_local_dev_gemini",
+  "name": "AI SDK Local to Fhir Dev Gemini",
+  "description": "This is a language model that can access data in FHIR",
+  "type": "langchain",
+  "model": {
+    "provider": "google",
+    "model": "gemini-2.5-pro"
+  },
+  "system_prompts": [
+    {
+      "content": "You are a tool that searches and retrieves from FHIR server.",
+      "role": "system"
+    },
+    {
+      "content": "If a user does not provide a person ID, use 31c718e9-a3d0-400f-8d95-5bcd9ece5c09 as the default person ID.  Pass this person id to any MCP tools that accept it as a parameter.",
+      "role": "system"
+    }
+  ],
+  "model_parameters": [
+    {
+      "key": "temperature",
+      "value": "0.0"
+    }
+  ],
+  "headers": [
+    {
+      "key": "Authorization",
+      "value": "Bearer OPENAI_API_KEY"
+    }
+  ],
+  "tools": [
+    {
+      "name": "current_date",
+      "parameters": [
+        {
+          "key": "format",
+          "value": "YYYY-MM-DD"
+        }
+      ]
+    },
+    {
+      "name": "fhir_server",
+      "url": "http://mcp-fhir-agent-dev:5000/",
+      "auth": "jwt_token",
+      "auth_providers": [
+        "oktafhirdev"
+      ],
+      "headers": {
+        "X-Client-Id": "Aiden"
+      }
+    }
+  ],
+  "example_prompts": [
+    {
+      "role": "user",
+      "content": "Show my health summary"
+    }
+  ]
+}
