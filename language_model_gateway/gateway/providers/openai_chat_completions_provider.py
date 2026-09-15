@@ -1,37 +1,45 @@
-from typing import Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Optional, override
 import json
 import logging
-import os
-from os import environ
 from random import randint
-from typing import Any, Dict, AsyncGenerator
 
 from httpx import Response
-from httpx_sse import aconnect_sse, ServerSentEvent
+from httpx_sse import aconnect_sse
+from oidcauthlib.auth.models.auth import AuthInformation
 from openai.types.chat import (
     ChatCompletion,
 )
 from pydantic_core import ValidationError
-
-from language_model_gateway.configs.config_schema import ChatModelConfig
-from language_model_gateway.gateway.auth.models.auth import AuthInformation
-from language_model_gateway.gateway.http.http_client_factory import HttpClientFactory
-
-
 from starlette.responses import StreamingResponse, JSONResponse
 
+from languagemodelcommon.configs.schemas.config_schema import ChatModelConfig
+from languagemodelcommon.http.http_client_factory import HttpClientFactory
 from language_model_gateway.gateway.providers.base_chat_completions_provider import (
     BaseChatCompletionsProvider,
 )
-from language_model_gateway.gateway.schema.openai.completions import ChatRequest
+from languagemodelcommon.structures.openai.request.chat_request_wrapper import (
+    ChatRequestWrapper,
+)
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
+
+if TYPE_CHECKING:
+    from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+        LanguageModelGatewayEnvironmentVariables,
+    )
 
 logger = logging.getLogger(__file__)
 logger.setLevel(SRC_LOG_LEVELS["LLM"])
 
 
 class OpenAiChatCompletionsProvider(BaseChatCompletionsProvider):
-    def __init__(self, *, http_client_factory: HttpClientFactory) -> None:
+    def __init__(
+        self,
+        *,
+        http_client_factory: HttpClientFactory,
+        environment_variables: LanguageModelGatewayEnvironmentVariables | None = None,
+    ) -> None:
         self.http_client_factory: HttpClientFactory = http_client_factory
         if self.http_client_factory is None:
             raise ValueError("http_client_factory must not be None")
@@ -39,40 +47,49 @@ class OpenAiChatCompletionsProvider(BaseChatCompletionsProvider):
             raise TypeError(
                 "http_client_factory must be an instance of HttpClientFactory"
             )
+        self._environment_variables: LanguageModelGatewayEnvironmentVariables | None = (
+            environment_variables
+        )
 
+    @override
     async def chat_completions(
         self,
         *,
         model_config: ChatModelConfig,
         headers: Dict[str, str],
-        chat_request: ChatRequest,
+        chat_request_wrapper: ChatRequestWrapper,
         auth_information: AuthInformation,
     ) -> StreamingResponse | JSONResponse:
         """
         Call the OpenAI API to get chat completions
 
         :param headers:
-        :param chat_request:
+        :param chat_request_wrapper:
         :param model_config:
         :param auth_information:
 
         :return:
         """
-        if not chat_request:
+        if chat_request_wrapper is None:
             raise ValueError("chat_request must not be None")
 
         request_id: str = str(randint(1, 1000))
-        agent_url: Optional[str] = model_config.url or environ["OPENAI_AGENT_URL"]
+        openai_agent_url: Optional[str] = (
+            self._environment_variables.openai_agent_url
+            if self._environment_variables
+            else None
+        )
+        agent_url: Optional[str] = model_config.url or openai_agent_url
         if not agent_url:
             raise ValueError("agent_url must not be None")
 
-        if chat_request.get("stream"):
+        if chat_request_wrapper.stream:
             return StreamingResponse(
-                await self.get_streaming_response_async(
+                self._stream_resp_async_generator(
                     agent_url=agent_url,
                     request_id=request_id,
+                    chat_request_wrapper=chat_request_wrapper,
                     headers=headers,
-                    chat_request=chat_request,
                 ),
                 media_type="text/event-stream",
             )
@@ -84,7 +101,7 @@ class OpenAiChatCompletionsProvider(BaseChatCompletionsProvider):
             try:
                 agent_response: Response = await client.post(
                     agent_url,
-                    json=chat_request,
+                    json=chat_request_wrapper.to_dict(),
                     timeout=60 * 60,
                     headers=headers,
                 )
@@ -111,33 +128,19 @@ class OpenAiChatCompletionsProvider(BaseChatCompletionsProvider):
                     content=f"Error validating response: {e}. url: {agent_url}\n{response_text}",
                     status_code=500,
                 )
-            if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+            if (
+                self._environment_variables
+                and self._environment_variables.log_input_and_output
+            ):
                 logger.info(f"Non-streaming response {request_id}: {response}")
             return JSONResponse(content=response.model_dump())
-
-    async def get_streaming_response_async(
-        self,
-        *,
-        agent_url: str,
-        request_id: str,
-        headers: Dict[str, str],
-        chat_request: ChatRequest,
-    ) -> AsyncGenerator[str, None]:
-        logger.info(f"Streaming response {request_id} from agent")
-        generator: AsyncGenerator[str, None] = self._stream_resp_async_generator(
-            agent_url=agent_url,
-            request_id=request_id,
-            chat_request=chat_request,
-            headers=headers,
-        )
-        return generator
 
     async def _stream_resp_async_generator(
         self,
         *,
         request_id: str,
         agent_url: str,
-        chat_request: ChatRequest,
+        chat_request_wrapper: ChatRequestWrapper,
         headers: Dict[str, str],
     ) -> AsyncGenerator[str, None]:
         logger.info(f"Streaming response {request_id} from agent")
@@ -149,30 +152,25 @@ class OpenAiChatCompletionsProvider(BaseChatCompletionsProvider):
                     client,
                     "POST",
                     agent_url,
-                    json=chat_request,
+                    json=chat_request_wrapper.to_dict(),
                     timeout=60 * 60,
                     headers=headers,
                 ) as event_source:
-                    i = 0
-                    sse: ServerSentEvent
                     async for sse in event_source.aiter_sse():
-                        event: str = sse.event
                         data: str = sse.data
-                        i += 1
-
-                        if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+                        if (
+                            self._environment_variables
+                            and self._environment_variables.log_input_and_output
+                        ):
                             if logger.isEnabledFor(logging.DEBUG):
                                 logger.debug(
-                                    f"----- Received data from stream {i} {event} {type(data)} ------"
-                                )
-                                logger.debug(data)
-                                logger.debug(
-                                    f"----- End data from stream {i} {event} {type(data)} ------"
+                                    f"----- Received SSE {sse.event}: {data} ------"
                                 )
                         yield f"data: {data}\n\n"
         except Exception as e:
             logger.error(
                 f"Exception in _stream_resp_async_generator: {e}", exc_info=True
             )
-            # Optionally yield an error message to the client
             yield f'data: {{"error": "{str(e)}"}}\n\n'
+        finally:
+            yield "data: [DONE]\n\n"

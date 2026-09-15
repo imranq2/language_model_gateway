@@ -1,4 +1,5 @@
 import asyncio
+from typing import override
 
 import math
 import logging
@@ -21,7 +22,8 @@ class CalculatorStddevTool(ResilientBaseTool):
     name: str = "CalculatorStddevTool"
     description: str = "Useful for when you need to calculate the standard deviation of a list of numbers"
 
-    async def _arun(self, numbers: list[float]) -> str:
+    @override
+    async def _arun(self, *, numbers: list[float]) -> str:
         """Run the tool to calculate the standard deviation of a list of numbers"""
         logger.info("Starting standard deviation calculation.")
         logger.debug(f"Input numbers: {numbers}")
@@ -48,6 +50,7 @@ class CalculatorStddevTool(ResilientBaseTool):
 
         return f"The standard deviation of the provided numbers is: {stddev:.2f}"
 
-    def _run(self, numbers: list[float]) -> str:
+    @override
+    def _run(self, *, numbers: list[float]) -> str:
         """Async implementation of the tool (in this case, just calls _run)"""
         return asyncio.run(self._arun(numbers=numbers))

@@ -2,32 +2,50 @@ import logging
 import traceback
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Dict, Any, TypedDict, Sequence, cast
+from typing import Annotated, Dict, Any, TypedDict, Sequence
+
+from languagemodelcommon.context.request_context import init_request_context
+from languagemodelcommon.converters.stream_buffer import StreamBufferManager
+from languagemodelcommon.converters.stream_debug_output_manager import (
+    StreamDebugOutputManager,
+)
 
 from botocore.exceptions import TokenRetrievalError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import params
+from oidcauthlib.auth.exceptions.authorization_needed_exception import (
+    AuthorizationNeededException,
+)
+from opentelemetry.trace import get_tracer
 from starlette.requests import Request
 from starlette.responses import StreamingResponse, JSONResponse
 
-from language_model_gateway.gateway.api_container import (
-    get_chat_manager,
-    get_token_reader,
-    get_environment_variables,
+from oidcauthlib.auth.auth_manager import AuthManager
+from oidcauthlib.auth.models.auth import AuthInformation
+from oidcauthlib.auth.models.token import Token
+from oidcauthlib.auth.token_reader import TokenReader
+from language_model_gateway.gateway.auth.mcp_auth_response_builder import (
+    McpAuthResponseBuilder,
 )
-from language_model_gateway.gateway.auth.exceptions.authorization_needed_exception import (
-    AuthorizationNeededException,
-)
-from language_model_gateway.gateway.auth.models.auth import AuthInformation
-from language_model_gateway.gateway.auth.models.token import Token
-from language_model_gateway.gateway.auth.token_reader import TokenReader
 from language_model_gateway.gateway.managers.chat_completion_manager import (
     ChatCompletionManager,
 )
-from language_model_gateway.gateway.schema.openai.completions import ChatRequest
-from language_model_gateway.gateway.utilities.environment_variables import (
-    EnvironmentVariables,
+from languagemodelcommon.utilities.logger.exception_logger import ExceptionLogger
+from languagemodelcommon.schema.openai.completions import ChatRequest
+from languagemodelcommon.schema.openai.responses import ResponsesRequest
+from languagemodelcommon.structures.openai.request.chat_completion_api_request_wrapper import (
+    ChatCompletionApiRequestWrapper,
 )
+from languagemodelcommon.structures.openai.request.chat_request_wrapper import (
+    ChatRequestWrapper,
+)
+from languagemodelcommon.structures.openai.request.responses_api_request_wrapper import (
+    ResponsesApiRequestWrapper,
+)
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
+)
+from simple_container.container.inject import Inject
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__name__)
@@ -83,16 +101,33 @@ class ChatCompletionsRouter:
             response_description="Chat completions",
             status_code=200,
         )
+        self.router.add_api_route(
+            "/responses",
+            self.chat_responses,
+            methods=["POST"],
+            response_model=None,
+            summary="Get responses for a chat prompt (OpenAI Responses API)",
+            description="Returns responses for a chat prompt using the new OpenAI Responses API specification.",
+            response_description="Chat responses",
+            status_code=200,
+        )
 
     # noinspection PyMethodMayBeStatic
     async def chat_completions(
         self,
         request: Request,
         chat_request: Dict[str, Any],
-        chat_manager: Annotated[ChatCompletionManager, Depends(get_chat_manager)],
-        token_reader: Annotated[TokenReader, Depends(get_token_reader)],
+        chat_manager: Annotated[
+            ChatCompletionManager, Depends(Inject(ChatCompletionManager))
+        ],
+        token_reader: Annotated[TokenReader, Depends(Inject(TokenReader))],
+        auth_manager: Annotated[AuthManager, Depends(Inject(AuthManager))],
+        mcp_auth_response_builder: Annotated[
+            McpAuthResponseBuilder, Depends(Inject(McpAuthResponseBuilder))
+        ],
         environment_variables: Annotated[
-            EnvironmentVariables, Depends(get_environment_variables)
+            LanguageModelGatewayEnvironmentVariables,
+            Depends(Inject(LanguageModelGatewayEnvironmentVariables)),
         ],
     ) -> StreamingResponse | JSONResponse:
         """
@@ -103,6 +138,7 @@ class ChatCompletionsRouter:
             chat_request: The chat request data
             chat_manager: Injected chat manager instance
             token_reader: Injected token reader instance
+            auth_manager: Injected auth manager instance
             environment_variables: Injected environment variables instance
 
         Returns:
@@ -116,74 +152,222 @@ class ChatCompletionsRouter:
         if chat_manager is None:
             raise ValueError("chat_manager must not be None")
 
+        tracer = get_tracer(
+            "language_model_gateway.gateway.routers.chat_completion_router"
+        )
+        # Start span as current so downstream HTTP client propagation uses the active context
+        with tracer.start_as_current_span("chat_completions_endpoint"):
+            chat_request_typed: ChatRequest = ChatRequest.model_construct(
+                **chat_request
+            )
+
+            chat_request_wrapper: ChatCompletionApiRequestWrapper = ChatCompletionApiRequestWrapper(
+                chat_request=chat_request_typed,
+                enable_debug_logging=False,
+                environment_variables=environment_variables,
+                emit_task_progress=environment_variables.emit_task_progress_in_chat_completions,
+            )
+            return await self._chat_completions(
+                request=request,
+                chat_request_wrapper=chat_request_wrapper,
+                chat_manager=chat_manager,
+                token_reader=token_reader,
+                auth_manager=auth_manager,
+                mcp_auth_response_builder=mcp_auth_response_builder,
+                environment_variables=environment_variables,
+            )
+
+    # noinspection PyMethodMayBeStatic
+    async def chat_responses(
+        self,
+        request: Request,
+        chat_request: Dict[str, Any],
+        chat_manager: Annotated[
+            ChatCompletionManager, Depends(Inject(ChatCompletionManager))
+        ],
+        token_reader: Annotated[TokenReader, Depends(Inject(TokenReader))],
+        auth_manager: Annotated[AuthManager, Depends(Inject(AuthManager))],
+        mcp_auth_response_builder: Annotated[
+            McpAuthResponseBuilder, Depends(Inject(McpAuthResponseBuilder))
+        ],
+        environment_variables: Annotated[
+            LanguageModelGatewayEnvironmentVariables,
+            Depends(Inject(LanguageModelGatewayEnvironmentVariables)),
+        ],
+    ) -> StreamingResponse | JSONResponse:
+        """
+        Chat completions endpoint. chat_manager is injected by FastAPI.
+
+        Args:
+            request: The incoming request
+            chat_request: The chat request data
+            chat_manager: Injected chat manager instance
+            token_reader: Injected token reader instance
+            auth_manager: Injected auth manager instance
+            mcp_auth_response_builder: Injected MCP auth response builder instance
+            environment_variables: Injected environment variables instance
+
+        Returns:
+            StreamingResponse or JSONResponse
+
+        Raises:
+            HTTPException: For various error conditions
+        """
+        if not chat_request:
+            raise ValueError("chat_request must not be empty or None")
+        if chat_manager is None:
+            raise ValueError("chat_manager must not be None")
+
+        chat_request_typed: ResponsesRequest = ResponsesRequest.model_construct(
+            **chat_request
+        )
+
+        return await self._chat_completions(
+            request=request,
+            chat_request_wrapper=ResponsesApiRequestWrapper(
+                chat_request=chat_request_typed,
+                enable_debug_logging=False,
+                environment_variables=environment_variables,
+            ),
+            chat_manager=chat_manager,
+            token_reader=token_reader,
+            auth_manager=auth_manager,
+            mcp_auth_response_builder=mcp_auth_response_builder,
+            environment_variables=environment_variables,
+        )
+
+    async def _chat_completions(
+        self,
+        request: Request,
+        chat_request_wrapper: ChatRequestWrapper,
+        chat_manager: Annotated[
+            ChatCompletionManager, Depends(Inject(ChatCompletionManager))
+        ],
+        token_reader: Annotated[TokenReader, Depends(Inject(TokenReader))],
+        auth_manager: Annotated[AuthManager, Depends(Inject(AuthManager))],
+        mcp_auth_response_builder: Annotated[
+            McpAuthResponseBuilder, Depends(Inject(McpAuthResponseBuilder))
+        ],
+        environment_variables: Annotated[
+            LanguageModelGatewayEnvironmentVariables,
+            Depends(Inject(LanguageModelGatewayEnvironmentVariables)),
+        ],
+    ) -> StreamingResponse | JSONResponse:
         try:
-            auth_information = await self.read_auth_information(
+            auth_information: AuthInformation = await self.read_auth_information(
                 environment_variables=environment_variables,
                 request=request,
                 token_reader=token_reader,
+                auth_manager=auth_manager,
             )
 
-            # noinspection PyInvalidCast
+            init_request_context(
+                stream_debug_output_manager=StreamDebugOutputManager(),
+                stream_buffer_manager=StreamBufferManager(
+                    flush_interval_seconds=environment_variables.streaming_buffer_flush_interval_seconds,
+                    enabled=environment_variables.enable_streaming_buffering,
+                ),
+            )
+
             return await chat_manager.chat_completions(
                 # convert headers to lowercase to match OpenAI API expectations
                 headers={k.lower(): v for k, v in request.headers.items()},
-                chat_request=cast(ChatRequest, chat_request),
+                chat_request_wrapper=chat_request_wrapper,
                 auth_information=auth_information,
             )
         except* TokenRetrievalError as e:
-            logger.exception(e, stack_info=True)
-            # return JSONResponse(content=f"Error retrieving AWS token: {e}", status_code=500)
+            first = ExceptionLogger.get_first_exception(e)
+            logger.exception(
+                "TokenRetrievalError: %s",
+                ExceptionLogger.format_exception_message(e),
+                stack_info=True,
+            )
             raise HTTPException(
                 status_code=500,
-                detail=f"Error retrieving AWS token: {e}.  If running on developer machines, run `aws sso login --profile [profile_name]` to get the token.",
+                detail=f"Error retrieving AWS token: {first}.  If running on developer machines, run `aws sso login --profile [profile_name]` to get the token.",
             )
         except* AuthorizationNeededException as e:
-            logger.exception(e, stack_info=True)
-            raise HTTPException(
-                status_code=401,
-                detail="Your login has expired. Please log in again.",
+            first = ExceptionLogger.get_first_exception(e)
+            logger.exception(
+                "AuthorizationNeededException: %s",
+                ExceptionLogger.format_exception_message(e),
+                stack_info=True,
             )
+            detail = "Your login has expired. Please log in again."
+            if isinstance(first, AuthorizationNeededException):
+                messages = mcp_auth_response_builder.from_authorization_needed(first)
+                if messages:
+                    detail = "\n".join(messages)
+            raise HTTPException(status_code=401, detail=detail)
         except* ConnectionError as e:
+            first = ExceptionLogger.get_first_exception(e)
             call_stack = traceback.format_exc()
             error_detail: ErrorDetail = {
-                "message": "Service connection error",
+                "message": f"Service connection error: {first}",
                 "timestamp": datetime.now().isoformat(),
                 "trace_id": "",
                 "call_stack": call_stack,
             }
-            logger.exception(e, stack_info=True)
+            logger.exception(
+                "ConnectionError: %s",
+                ExceptionLogger.format_exception_message(e),
+                stack_info=True,
+            )
             raise HTTPException(status_code=503, detail=error_detail)
 
         except* ValueError as e:
+            first = ExceptionLogger.get_first_exception(e)
             call_stack = traceback.format_exc()
             error_detail = {
-                "message": str(e),
+                "message": str(first),
                 "timestamp": datetime.now().isoformat(),
                 "trace_id": "",
                 "call_stack": call_stack,
             }
-            logger.exception(e, stack_info=True)
+            logger.exception(
+                "ValueError: %s",
+                ExceptionLogger.format_exception_message(e),
+                stack_info=True,
+            )
             raise HTTPException(status_code=400, detail=error_detail)
 
         except* Exception as e:
+            first = ExceptionLogger.get_first_exception(e)
             call_stack = traceback.format_exc()
             error_detail = {
-                "message": "Internal server error",
+                "message": f"Internal server error: {first}",
                 "timestamp": datetime.now().isoformat(),
                 "trace_id": "",
                 "call_stack": call_stack,
             }
-            logger.exception(e, stack_info=True)
+            logger.exception(
+                "Unhandled exception: %s",
+                ExceptionLogger.format_exception_message(e),
+                stack_info=True,
+            )
             raise HTTPException(status_code=500, detail=error_detail)
 
+    # noinspection PyMethodMayBeStatic
     async def read_auth_information(
         self,
         *,
-        environment_variables: EnvironmentVariables,
+        environment_variables: LanguageModelGatewayEnvironmentVariables,
         request: Request,
         token_reader: TokenReader,
+        auth_manager: AuthManager,
     ) -> AuthInformation:
-        # read the authorization header and extract the token
+        """
+        Reads the authentication information from the request headers and verifies the token if present.
+        Args:
+            environment_variables: The environment variables instance
+            request: The incoming request
+            token_reader: The token reader instance
+            auth_manager: The authentication manager instance
+        Returns:
+            AuthInformation instance with the extracted information
+        """
+
+        # set default values first and the override if we have a valid token
         auth_information: AuthInformation = AuthInformation(
             redirect_uri=environment_variables.auth_redirect_uri
             or str(request.url_for("auth_callback")),
@@ -196,30 +380,36 @@ class ChatCompletionsRouter:
         )
         auth_header = request.headers.get("Authorization")
         if auth_header:
-            token: str | None = token_reader.extract_token(auth_header)
+            token: str | None = token_reader.extract_token(
+                authorization_header=auth_header
+            )
+            token_item: Token | None = None
             if (
-                token and token != "fake-api-key" and token != "bedrock"
-            ):  # fake-api-key and "bedrock" are special values to bypass auth for local dev and bedrock access
-                token_item: Token | None = await token_reader.verify_token_async(
-                    token=token
+                token and token in ["bedrock", "fake-api-key"]
+                # fake-api-key and "bedrock" are special values to bypass auth for local dev and bedrock access
+            ):
+                token_item = None
+            elif token:
+                token_item = await token_reader.verify_token_async(token=token)
+
+            if token_item is not None:
+                auth_information.claims = token_item.claims
+                auth_information.expires_at = token_item.expires
+                auth_information.audience = token_item.audience
+                # Okta sets email in subject sometimes, so check both
+                auth_information.email = token_item.email or (
+                    token_item.subject
+                    if token_item.subject and "@" in token_item.subject
+                    else None
                 )
-                if token_item is not None:
-                    auth_information.claims = token_item.claims
-                    auth_information.expires_at = token_item.expires
-                    auth_information.audience = token_item.audience
-                    auth_information.email = token_item.email
-                    auth_information.subject = token_item.subject or token_item.email
-                    auth_information.user_name = token_item.name
-            else:
-                # read information from headers if present
-                if "x-openwebui-user-id" in request.headers:
-                    auth_information.subject = request.headers["x-openwebui-user-id"]
-                if "x-openwebui-user-email" in request.headers:
-                    auth_information.email = request.headers["x-openwebui-user-email"]
-                if "x-openwebui-user-name" in request.headers:
-                    auth_information.user_name = request.headers[
-                        "x-openwebui-user-name"
-                    ]
+                auth_information.subject = token_item.subject or token_item.email
+                auth_information.user_name = token_item.name
+            # else: no verified token — do not trust caller-controlled
+            # x-openwebui-user-* headers for identity (they are fully
+            # spoofable and were previously used to set auth_information.subject,
+            # which system_command_manager uses to delete another user's cached
+            # tokens via referring_subject; an unauthenticated caller could
+            # forge that header to force-clear an arbitrary user's session).
         return auth_information
 
     def get_router(self) -> APIRouter:

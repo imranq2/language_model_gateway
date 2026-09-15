@@ -1,14 +1,30 @@
+from __future__ import annotations
+
 import asyncio
 import logging
-import os
 import random
-from os import environ
-from typing import Optional, Dict, Any, List, cast, Type, Literal, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Optional,
+    Dict,
+    Any,
+    List,
+    cast,
+    Type,
+    Literal,
+    Tuple,
+    override,
+)
 
 import httpx
 from pydantic import PrivateAttr, Field, BaseModel
 
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
+
+if TYPE_CHECKING:
+    from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+        LanguageModelGatewayEnvironmentVariables,
+    )
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
 logger = logging.getLogger(__file__)
@@ -16,7 +32,7 @@ logger.setLevel(SRC_LOG_LEVELS["AGENTS"])
 
 
 # Utility to redact sensitive info from params
-def redact_params(params: Dict[str, Any]) -> Dict[str, Any]:
+def redact_params(*, params: Dict[str, Any]) -> Dict[str, Any]:
     redacted = params.copy()
     for sensitive_key in ("key", "cx", "api_key", "cse_id"):
         if sensitive_key in redacted:
@@ -72,14 +88,24 @@ class GoogleSearchTool(ResilientBaseTool):
     _max_retries: int = PrivateAttr(default=3)
     _base_delay: float = PrivateAttr(default=1.0)
     _max_delay: float = PrivateAttr(default=60.0)
+    _environment_variables: LanguageModelGatewayEnvironmentVariables | None = (
+        PrivateAttr(default=None)
+    )
 
-    def __init__(self, **data: Any) -> None:
+    def __init__(
+        self,
+        environment_variables: LanguageModelGatewayEnvironmentVariables | None = None,
+        **data: Any,
+    ) -> None:
         super().__init__(**data)
         self._client = httpx.AsyncClient()
-        api_key: Optional[str] = environ.get("GOOGLE_API_KEY")
-        cse_id: Optional[str] = environ.get("GOOGLE_CSE_ID")
-        self._api_key = api_key
-        self._cse_id = cse_id
+        self._environment_variables = environment_variables
+        self._api_key = (
+            environment_variables.google_api_key if environment_variables else None
+        )
+        self._cse_id = (
+            environment_variables.google_cse_id if environment_variables else None
+        )
 
     async def _handle_rate_limit(self, *, retry_count: int, error_text: str) -> None:
         """Handle rate limiting with exponential backoff."""
@@ -101,8 +127,11 @@ class GoogleSearchTool(ResilientBaseTool):
 
         while True:
             try:
-                if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
-                    safe_params = redact_params(params)
+                if (
+                    self._environment_variables
+                    and self._environment_variables.log_input_and_output
+                ):
+                    safe_params = redact_params(params=params)
                     logger.info(
                         f"Running Google search with query {params.get('q')}. Params: {safe_params}. Retry count: {retry_count}"
                     )
@@ -133,7 +162,7 @@ class GoogleSearchTool(ResilientBaseTool):
                     continue
                 raise
             except Exception as e:
-                safe_params = redact_params(params)
+                safe_params = redact_params(params=params)
                 logger.exception(
                     f"Error making request for {url} with params {safe_params}\n{str(e)}"
                 )
@@ -143,14 +172,16 @@ class GoogleSearchTool(ResilientBaseTool):
         """Close the HTTP client."""
         await self._client.aclose()
 
+    @override
     def _run(
-        self, query: str, use_verbose_logging: Optional[bool] = None
+        self, *, query: str, use_verbose_logging: Optional[bool] = None
     ) -> Tuple[str, str]:
         """Use async version of this tool."""
         raise NotImplementedError("Use async version of this tool")
 
+    @override
     async def _arun(
-        self, query: str, use_verbose_logging: Optional[bool] = None
+        self, *, query: str, use_verbose_logging: Optional[bool] = None
     ) -> Tuple[str, str]:
         """Async implementation of the Google search tool."""
 
@@ -178,7 +209,10 @@ class GoogleSearchTool(ResilientBaseTool):
                     snippets.append(f"- {result['snippet']} ({result.get('link')})")
 
             response: str = "\n".join(snippets)
-            if os.environ.get("LOG_INPUT_AND_OUTPUT", "0") == "1":
+            if (
+                self._environment_variables
+                and self._environment_variables.log_input_and_output
+            ):
                 logger.info(f"Google Search results: {response}")
 
             artifact: str = f'GoogleSearchAgent: Searched Google for "{query}"'
@@ -239,7 +273,7 @@ class GoogleSearchTool(ResilientBaseTool):
         try:
             result = await self._make_request(url, params)
             if not result:
-                safe_params = redact_params(params)
+                safe_params = redact_params(params=params)
                 logger.exception(
                     f"Error making request for {url} with params {safe_params}"
                 )

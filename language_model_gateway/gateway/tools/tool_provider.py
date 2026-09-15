@@ -1,21 +1,19 @@
 import logging
-from os import environ
 from typing import Dict, List
 
 from langchain_community.tools import (
-    DuckDuckGoSearchRun,
     ArxivQueryRun,
 )
 from langchain_core.tools import BaseTool
 
-from language_model_gateway.configs.config_schema import AgentConfig
-from language_model_gateway.gateway.file_managers.file_manager_factory import (
+from languagemodelcommon.configs.schemas.config_schema import AgentConfig
+from languagemodelcommon.file_managers.file_manager_factory import (
     FileManagerFactory,
 )
-from language_model_gateway.gateway.image_generation.image_generator_factory import (
+from languagemodelcommon.image_generation.image_generator_factory import (
     ImageGeneratorFactory,
 )
-from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtractorFactory
+from languagemodelcommon.ocr.ocr_extractor_factory import OCRExtractorFactory
 from language_model_gateway.gateway.tools.confluence_page_retriever import (
     ConfluencePageRetriever,
 )
@@ -43,7 +41,6 @@ from language_model_gateway.gateway.tools.github_pull_request_diff_tool import (
 from language_model_gateway.gateway.tools.github_pull_request_retriever_tool import (
     GitHubPullRequestRetriever,
 )
-from language_model_gateway.gateway.tools.google_search_tool import GoogleSearchTool
 from language_model_gateway.gateway.tools.graph_viz_diagram_generator_tool import (
     GraphVizDiagramGeneratorTool,
 )
@@ -59,19 +56,29 @@ from language_model_gateway.gateway.tools.databricks_sql_tool import DatabricksS
 from language_model_gateway.gateway.tools.jira_issue_retriever import (
     JiraIssueRetriever,
 )
+from language_model_gateway.gateway.tools.user_profile.get_user_profile_tool import (
+    GetUserProfileTool,
+)
+from language_model_gateway.gateway.tools.memories.memory_read_tool import (
+    MemoryReadTool,
+)
+from language_model_gateway.gateway.tools.memories.memory_write_tool import (
+    MemoryWriteTool,
+)
+from language_model_gateway.gateway.tools.user_profile.store_user_profile_tool import (
+    StoreUserProfileTool,
+)
 from language_model_gateway.gateway.tools.network_topology_diagram_tool import (
     NetworkTopologyGeneratorTool,
 )
 from language_model_gateway.gateway.tools.pdf_extraction_tool import PDFExtractionTool
 from language_model_gateway.gateway.tools.provider_search_tool import ProviderSearchTool
-from language_model_gateway.gateway.tools.python_repl_tool import PythonReplTool
 from language_model_gateway.gateway.tools.scraping_bee_web_scraper_tool import (
     ScrapingBeeWebScraperTool,
 )
 from language_model_gateway.gateway.tools.sequence_diagram_generator_tool import (
     SequenceDiagramGeneratorTool,
 )
-from language_model_gateway.gateway.tools.url_to_markdown_tool import URLToMarkdownTool
 from language_model_gateway.gateway.tools.calculator_average_tool import (
     CalculatorAverageTool,
 )
@@ -85,8 +92,8 @@ from language_model_gateway.gateway.tools.calculator_length_tool import (
 from language_model_gateway.gateway.utilities.confluence.confluence_helper import (
     ConfluenceHelper,
 )
-from language_model_gateway.gateway.utilities.environment_variables import (
-    EnvironmentVariables,
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
 )
 from language_model_gateway.gateway.utilities.github.github_pull_request_helper import (
     GithubPullRequestHelper,
@@ -110,38 +117,22 @@ class ToolProvider:
         image_generator_factory: ImageGeneratorFactory,
         file_manager_factory: FileManagerFactory,
         ocr_extractor_factory: OCRExtractorFactory,
-        environment_variables: EnvironmentVariables,
+        environment_variables: LanguageModelGatewayEnvironmentVariables,
         github_pull_request_helper: GithubPullRequestHelper,
         jira_issues_helper: JiraIssueHelper,
         confluence_helper: ConfluenceHelper,
         databricks_helper: DatabricksHelper,
     ) -> None:
-        web_search_tool: BaseTool
-        default_web_search_tool: str = environ.get(
-            "DEFAULT_WEB_SEARCH_TOOL", "duckduckgo"
-        )
-        match default_web_search_tool:
-            case "duckduckgo_search":
-                web_search_tool = DuckDuckGoSearchRun()
-            case "google_search":
-                web_search_tool = GoogleSearchTool()
-            case _:
-                raise ValueError(
-                    f"Unknown default web search tool: {default_web_search_tool}"
-                )
-
         self.tools: Dict[str, BaseTool] = {
             "current_date": CurrentTimeTool(),
             "calculator_average": CalculatorAverageTool(),
             "calculator_stddev": CalculatorStddevTool(),
             "calculator_sum": CalculatorSumTool(),
             "calculator_length": CalculatorLengthTool(),
-            "web_search": web_search_tool,
             "pubmed": PubmedQueryRun(),
-            "google_search": GoogleSearchTool(),
-            "duckduckgo_search": DuckDuckGoSearchRun(),
-            "python_repl": PythonReplTool(),
-            "get_web_page": URLToMarkdownTool(),
+            # "google_search": GoogleSearchTool(),
+            # "duckduckgo_search": DuckDuckGoSearchRun(),
+            # "python_repl": PythonReplTool(),
             "arxiv_search": ArxivQueryRun(),
             "health_summary_generator": HealthSummaryGeneratorTool(
                 file_manager_factory=file_manager_factory,
@@ -150,42 +141,54 @@ class ToolProvider:
                 image_generator_factory=image_generator_factory,
                 file_manager_factory=file_manager_factory,
                 model_provider="aws",
+                environment_variables=environment_variables,
             ),
             "image_generator_openai": ImageGeneratorTool(
                 image_generator_factory=image_generator_factory,
                 file_manager_factory=file_manager_factory,
                 model_provider="openai",
+                environment_variables=environment_variables,
             ),
             "graph_viz_diagram_generator": GraphVizDiagramGeneratorTool(
-                file_manager_factory=file_manager_factory
+                file_manager_factory=file_manager_factory,
+                environment_variables=environment_variables,
             ),
             "sequence_diagram_generator": SequenceDiagramGeneratorTool(
-                file_manager_factory=file_manager_factory
+                file_manager_factory=file_manager_factory,
+                environment_variables=environment_variables,
             ),
             "flow_chart_generator": FlowChartGeneratorTool(
-                file_manager_factory=file_manager_factory
+                file_manager_factory=file_manager_factory,
+                environment_variables=environment_variables,
             ),
             "er_diagram_generator": ERDiagramGeneratorTool(
-                file_manager_factory=file_manager_factory
+                file_manager_factory=file_manager_factory,
+                environment_variables=environment_variables,
             ),
             "network_topology_generator": NetworkTopologyGeneratorTool(
-                file_manager_factory=file_manager_factory
+                file_manager_factory=file_manager_factory,
+                environment_variables=environment_variables,
             ),
             "scraping_bee_web_scraper": ScrapingBeeWebScraperTool(
-                api_key=environ.get("SCRAPING_BEE_API_KEY")
+                api_key=environment_variables.scraping_bee_api_key,
+                environment_variables=environment_variables,
             ),
-            "provider_search": ProviderSearchTool(),
+            "provider_search": ProviderSearchTool(
+                environment_variables=environment_variables,
+            ),
             "pdf_text_extractor": PDFExtractionTool(
                 ocr_extractor_factory=ocr_extractor_factory
             ),
             "github_pull_request_analyzer": GitHubPullRequestAnalyzerTool(
-                github_pull_request_helper=github_pull_request_helper
+                github_pull_request_helper=github_pull_request_helper,
+                environment_variables=environment_variables,
             ),
             "github_pull_request_diff": GitHubPullRequestDiffTool(
                 github_pull_request_helper=github_pull_request_helper
             ),
             "jira_issues_analyzer": JiraIssuesAnalyzerTool(
-                jira_issues_helper=jira_issues_helper
+                jira_issues_helper=jira_issues_helper,
+                environment_variables=environment_variables,
             ),
             "databricks_query_validator": DatabricksSQLTool(
                 databricks_helper=databricks_helper
@@ -203,6 +206,10 @@ class ToolProvider:
             "confluence_page_retriever": ConfluencePageRetriever(
                 confluence_helper=confluence_helper
             ),
+            "get_user_profile": GetUserProfileTool(),
+            "store_user_profile": StoreUserProfileTool(),
+            "memory_writer": MemoryWriteTool(),
+            "memory_reader": MemoryReadTool(),
             # "sql_query": QuerySQLDataBaseTool(
             #     db=SQLDatabase(
             #         engine=Engine(
