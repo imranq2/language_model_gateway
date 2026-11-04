@@ -1,7 +1,7 @@
 import base64
 import io
 import logging
-from typing import Type, Literal, Tuple, Optional, Dict
+from typing import Type, Literal, Tuple, Optional, Dict, override
 
 import httpx
 import pypdf
@@ -9,8 +9,8 @@ from httpx import Response, Headers
 from pydantic import BaseModel, Field
 from pypdf import PageObject
 
-from language_model_gateway.gateway.ocr.ocr_extractor import OCRExtractor
-from language_model_gateway.gateway.ocr.ocr_extractor_factory import OCRExtractorFactory
+from languagemodelcommon.ocr.ocr_extractor import OCRExtractor
+from languagemodelcommon.ocr.ocr_extractor_factory import OCRExtractorFactory
 from language_model_gateway.gateway.tools.resilient_base_tool import ResilientBaseTool
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
 
@@ -60,8 +60,10 @@ class PDFExtractionTool(ResilientBaseTool):
     ocr_extractor_factory: OCRExtractorFactory
     ocr_type: Literal["aws"] = "aws"
 
+    @override
     def _run(
         self,
+        *,
         url: Optional[str] = None,
         base64_pdf: Optional[str] = None,
         start_page: Optional[int] = None,
@@ -79,8 +81,10 @@ class PDFExtractionTool(ResilientBaseTool):
         """
         raise NotImplementedError("Use async version of this tool")
 
+    @override
     async def _arun(
         self,
+        *,
         url: Optional[str] = None,
         base64_pdf: Optional[str] = None,
         start_page: Optional[int] = None,
@@ -143,7 +147,9 @@ class PDFExtractionTool(ResilientBaseTool):
             pdf_buffer: io.BytesIO = io.BytesIO(pdf_bytes)
 
             # First, try PyPDF text extraction
-            full_text = self._extract_text_with_pypdf(pdf_buffer, start_page, end_page)
+            full_text = self._extract_text_with_pypdf(
+                pdf_buffer=pdf_buffer, start_page=start_page, end_page=end_page
+            )
 
             # If text extraction fails and OCR is enabled, use Textract
             if not full_text.strip() and use_ocr:
@@ -176,7 +182,7 @@ class PDFExtractionTool(ResilientBaseTool):
 
     @staticmethod
     def extract_single_page_as_pdf(
-        pdf_reader: pypdf.PdfReader, page_number: int
+        *, pdf_reader: pypdf.PdfReader, page_number: int
     ) -> Optional[bytes]:
         """
         Extract a single page from a PDF as a new PDF byte stream.
@@ -218,6 +224,7 @@ class PDFExtractionTool(ResilientBaseTool):
 
     @staticmethod
     def _extract_text_with_pypdf(
+        *,
         pdf_buffer: io.BytesIO,
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,

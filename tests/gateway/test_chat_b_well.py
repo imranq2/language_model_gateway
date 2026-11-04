@@ -6,29 +6,24 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from pytest_httpx import HTTPXMock
 
-from language_model_gateway.configs.config_schema import (
+from languagemodelcommon.configs.schemas.config_schema import (
     ChatModelConfig,
     ModelConfig,
     AgentConfig,
     PromptConfig,
     ModelParameterConfig,
 )
-from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
-    ConfigExpiringCache,
-)
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
+from tests.common import set_model_configs
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
+from simple_container.container.interfaces import IContainer
 
 
 async def test_chat_completions_b_well(
-    async_client: httpx.AsyncClient, httpx_mock: HTTPXMock
+    async_client: httpx.AsyncClient, httpx_mock: HTTPXMock, test_container: IContainer
 ) -> None:
     print("")
-    test_container: SimpleContainer = await get_container_async()
-
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
         httpx_mock.add_callback(
             callback=lambda request: Response(
@@ -56,10 +51,8 @@ async def test_chat_completions_b_well(
         return  # this test only works with AI Agent
 
     # set the model configuration for this test
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="b.well",
@@ -83,7 +76,7 @@ async def test_chat_completions_b_well(
                     AgentConfig(name="get_web_page"),
                 ],
             )
-        ]
+        ],
     )
     # init client and connect to localhost server
     client = AsyncOpenAI(

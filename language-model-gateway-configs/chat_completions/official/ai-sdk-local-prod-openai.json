@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/imranq2/language_model_gateway/main/language_model_gateway/configs/config_schema.json",
+  "id": "ai_sdk_local_prod_openai",
+  "name": "AI SDK Local to Fhir Production OpenAI",
+  "description": "This is a language model that can access data in FHIR",
+  "type": "langchain",
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o"
+  },
+  "system_prompts": [
+    {
+      "content": "You are a tool that searches and retrieves from FHIR server.",
+      "role": "system"
+    },
+    {
+      "content": "If a user does not provide a person ID, use c9ab6abe-ae18-4226-b60f-99cfacff7171 as the default person ID.  You must pass this person id to any MCP tools that accept it as a parameter.",
+      "role": "system"
+    }
+  ],
+  "model_parameters": [
+    {
+      "key": "temperature",
+      "value": "0.0"
+    }
+  ],
+  "headers": [
+    {
+      "key": "Authorization",
+      "value": "Bearer OPENAI_API_KEY"
+    }
+  ],
+  "tools": [
+    {
+      "name": "current_date",
+      "parameters": [
+        {
+          "key": "format",
+          "value": "YYYY-MM-DD"
+        }
+      ]
+    },
+    {
+      "name": "fhir_server",
+      "url": "http://mcp-fhir-agent-production:5000/",
+      "auth": "jwt_token",
+      "auth_providers": [
+        "oktafhirprod"
+      ],
+      "headers": {
+        "X-Client-Id": "Aiden"
+      }
+    }
+  ],
+  "example_prompts": [
+    {
+      "role": "user",
+      "content": "Show my health summary"
+    }
+  ]
+}

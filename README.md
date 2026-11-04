@@ -20,7 +20,7 @@ To run the project locally, follow these steps:
     cd <repository-directory>
     ```
 
-2. Create `docker.env` file in the root of the project based on the `docker.env.example`. 
+2. Create `.env` file in the root of the project based on the `.env.example`. 
 Update the keys for the functionality/providers you're planning on using.
 `AWS_CREDENTIALS_PROFILE` is the only one that is absolutely required to get going.  Set this to the AWS profile you're part of e.g., `admin_dev`.
 
@@ -43,6 +43,7 @@ The project is structured into several main components:
 - **API**: Built using FastAPI, it provides endpoints for interacting with the language models.
 - **GraphQL**: Used for querying and mutating data.
 - **Routers**: Define the routes for different functionalities like chat completions, image generation, etc.
+  - [CodingModelRouter](docs/coding_model_router.md) — Anthropic/Bedrock proxy for model routing
 - **Managers**: Handle the business logic for different functionalities.
 - **Utilities**: Helper functions and classes used across the project.
 - **Tools**: AI Agents that perform specific tasks like querying databases, calling APIs, etc.
@@ -147,7 +148,7 @@ If you encounter any issues, please report them by creating a new issue in the r
 
 ### How do I set up the environment variables?
 
-Create a `docker.env` file in the root of the project based on the `docker.env.example` file. Update the keys for the functionality/providers you're planning on using.
+Create a `.env` file in the root of the project based on the `.env.example` file. Update the keys for the functionality/providers you're planning on using.
 
 ### How do I run the tests?
 
@@ -159,6 +160,10 @@ make tests
 ### How do I add a new AI Agent?
 
 Refer to the [add_new_agent.md](add_new_agent.md) file for detailed instructions on how to add a new AI Agent.
+
+### Where is caching done in this tool?
+
+Refer to the [CACHING.md](CACHING.md) file for comprehensive documentation on all caching mechanisms used in the Language Model Gateway, including model configuration caching, token/authentication caching, MCP tools metadata caching, and function result caching.
 
 ## Troubleshooting Tips
 

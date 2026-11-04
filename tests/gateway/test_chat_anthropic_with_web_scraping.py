@@ -4,31 +4,27 @@ import httpx
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 
-from language_model_gateway.configs.config_schema import (
+from languagemodelcommon.configs.schemas.config_schema import (
     ChatModelConfig,
     ModelConfig,
     AgentConfig,
     PromptConfig,
 )
-from language_model_gateway.gateway.utilities.cache.config_expiring_cache import (
-    ConfigExpiringCache,
-)
-from language_model_gateway.container.simple_container import SimpleContainer
-from language_model_gateway.gateway.api_container import get_container_async
-from language_model_gateway.gateway.models.model_factory import ModelFactory
+from tests.common import set_model_configs
+from languagemodelcommon.models.model_factory import ModelFactory
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
 from tests.gateway.mocks.mock_chat_model import MockChatModel
 from tests.gateway.mocks.mock_model_factory import MockModelFactory
+from simple_container.container.interfaces import IContainer
 
 
 async def test_chat_anthropic_with_web_scraping(
-    async_client: httpx.AsyncClient,
+    async_client: httpx.AsyncClient, test_container: IContainer
 ) -> None:
-    test_container: SimpleContainer = await get_container_async()
     if not EnvironmentReader.is_environment_variable_set("RUN_TESTS_WITH_REAL_LLM"):
-        test_container.register(
+        test_container.singleton(
             ModelFactory,
             lambda c: MockModelFactory(
                 fn_get_model=lambda chat_model_config: MockChatModel(
@@ -38,10 +34,8 @@ async def test_chat_anthropic_with_web_scraping(
         )
 
     # set the model configuration for this test
-    model_configuration_cache: ConfigExpiringCache = test_container.resolve(
-        ConfigExpiringCache
-    )
-    await model_configuration_cache.set(
+    await set_model_configs(
+        test_container,
         [
             ChatModelConfig(
                 id="parse_web_page",
@@ -55,7 +49,7 @@ async def test_chat_anthropic_with_web_scraping(
                 system_prompts=[
                     PromptConfig(
                         role="system",
-                        content="You are an assistant that parses web pages.  Let’s think step by step and take your time to get the right answer.  Try the get_web_page tool first and if you don't get the answer then use the scraping_bee_web_scraper tool.",
+                        content="You are an assistant that parses web pages.  Let’s think step by step and take your time to get the right answer.  Try the get_web_page tool first and if you don’t get the answer then use the scraping_bee_web_scraper tool.",
                     )
                 ],
                 tools=[
@@ -64,7 +58,7 @@ async def test_chat_anthropic_with_web_scraping(
                     AgentConfig(name="scraping_bee_web_scraper"),
                 ],
             )
-        ]
+        ],
     )
 
     # init client and connect to localhost server

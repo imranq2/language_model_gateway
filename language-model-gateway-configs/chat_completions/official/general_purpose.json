@@ -1,0 +1,85 @@
+{
+  "$schema": "https://raw.githubusercontent.com/imranq2/language_model_gateway/main/language_model_gateway/configs/config_schema.json",
+  "description": "This is a general purpose model that can be used for a variety of tasks.  However, it may not work as well as the Task Specific models.  Use the Task Specific models if there is one that aligns with your task.",
+  "example_prompts": [
+    {
+      "content": "Search for the latest research on the use of AI in healthcare.",
+      "role": "user"
+    },
+    {
+      "content": "What is the largest customer of Epic?",
+      "role": "user"
+    },
+    {
+      "content": "Write a unit test for this code: ```def test_addition(a,b): return a + b```",
+      "role": "user"
+    }
+  ],
+  "headers": [
+    {
+      "key": "Authorization",
+      "value": "Bearer OPENAI_API_KEY"
+    }
+  ],
+  "id": "general_purpose",
+  "model_parameters": [
+    {
+      "key": "temperature",
+      "value": 0.5
+    },
+    {
+      "key": "max_tokens",
+      "value": 50000
+    }
+  ],
+  "name": "General Purpose",
+  "owner": "Imran Qureshi",
+  "plugins": [
+    "all-employees"
+  ],
+  "skills": [
+    "*"
+  ],
+  "system_prompts": [
+    {
+      "name": "general_purpose",
+      "role": "system"
+    },
+    {
+      "name": "skills",
+      "role": "system"
+    }
+  ],
+  "tools": [
+    {
+      "name": "current_date",
+      "parameters": [
+        {
+          "key": "format",
+          "value": "YYYY-MM-DD"
+        }
+      ]
+    },
+    {
+      "mcp_server": "*",
+      "name": "all_mcp_servers"
+    },
+    {
+      "description": "Search and retrieve biomedical literature from PubMed",
+      "name": "pubmed"
+    },
+    {
+      "description": "Search and retrieve scientific papers from arXiv",
+      "name": "arxiv_search"
+    },
+    {
+      "description": "Generate images based on text prompts using an image generation model",
+      "name": "image_generator"
+    },
+    {
+      "description": "Extract text content from PDF documents for analysis and processing",
+      "name": "pdf_text_extractor"
+    }
+  ],
+  "use_tool_discovery": true
+}

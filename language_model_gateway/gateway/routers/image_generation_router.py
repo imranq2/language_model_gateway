@@ -8,11 +8,11 @@ from starlette.requests import Request
 from fastapi import params
 from starlette.responses import JSONResponse, StreamingResponse
 
-from language_model_gateway.gateway.api_container import get_image_generation_manager
-from language_model_gateway.gateway.managers.image_generation_manager import (
+from simple_container.container.inject import Inject
+from languagemodelcommon.image_generation.managers.image_generation_manager import (
     ImageGenerationManager,
 )
-from language_model_gateway.gateway.schema.openai.image_generation import (
+from languagemodelcommon.schema.openai.image_generation import (
     ImageGenerationRequest,
 )
 from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
@@ -60,7 +60,7 @@ class ImageGenerationRouter:
         request: Request,
         image_generation_request: Dict[str, Any],
         model_manager: Annotated[
-            ImageGenerationManager, Depends(get_image_generation_manager)
+            ImageGenerationManager, Depends(Inject(ImageGenerationManager))
         ],
     ) -> StreamingResponse | JSONResponse:
         """

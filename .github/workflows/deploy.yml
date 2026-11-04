@@ -29,18 +29,20 @@ jobs:
     runs-on: main
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout icanbwell/cie.gha-deploy
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: refs/tags/v0.0.33
           repository: icanbwell/cie.gha-deploy
           token: ${{ secrets.BWELL_DEV_PAT }}
           path: .github/actions/cie.gha-deploy
+          persist-credentials: false
 
       - name: Deploy
         uses: ./.github/actions/cie.gha-deploy

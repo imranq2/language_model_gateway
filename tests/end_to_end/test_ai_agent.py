@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 import httpx
 import pytest
+from languagemodelcommon.mocks.mock_http_client_factory import MockHttpClientFactory
 from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionUserMessageParam,
@@ -12,17 +13,28 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion import Choice
 from starlette.responses import StreamingResponse, JSONResponse
 
-from language_model_gateway.configs.config_schema import ChatModelConfig, ModelConfig
-from language_model_gateway.gateway.auth.models.auth import AuthInformation
-from language_model_gateway.gateway.http.http_client_factory import HttpClientFactory
+from languagemodelcommon.configs.schemas.config_schema import (
+    ChatModelConfig,
+    ModelConfig,
+)
+from oidcauthlib.auth.models.auth import AuthInformation
+from languagemodelcommon.http.http_client_factory import HttpClientFactory
 from language_model_gateway.gateway.providers.openai_chat_completions_provider import (
     OpenAiChatCompletionsProvider,
 )
-from language_model_gateway.gateway.schema.openai.completions import ChatRequest
+from languagemodelcommon.schema.openai.completions import ChatRequest
+from languagemodelcommon.structures.openai.request.chat_completion_api_request_wrapper import (
+    ChatCompletionApiRequestWrapper,
+)
+from languagemodelcommon.structures.openai.request.chat_request_wrapper import (
+    ChatRequestWrapper,
+)
 from language_model_gateway.gateway.utilities.environment_reader import (
     EnvironmentReader,
 )
-from tests.gateway.mocks.mock_http_client_factory import MockHttpClientFactory
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
+)
 from tests.gateway.mocks.mock_open_ai_completions_provider import (
     MockOpenAiChatCompletionsProvider,
 )
@@ -39,9 +51,13 @@ async def test_call_agent_with_input(async_client: httpx.AsyncClient) -> None:
     )
     # Create a ChatRequest object
     model = "General Purpose"
-    chat_request = ChatRequest(
-        model=model,
-        messages=chat_history + [user_message],
+    chat_request_wrapper = ChatCompletionApiRequestWrapper(
+        chat_request=ChatRequest(
+            model=model,
+            messages=chat_history + [user_message],
+        ),
+        enable_debug_logging=False,
+        environment_variables=LanguageModelGatewayEnvironmentVariables(),
     )
 
     provider: OpenAiChatCompletionsProvider
@@ -56,7 +72,7 @@ async def test_call_agent_with_input(async_client: httpx.AsyncClient) -> None:
         def mock_fn_get_response(
             model_config: ChatModelConfig,
             headers: Dict[str, str],
-            chat_request: ChatRequest,
+            chat_request_wrapper: ChatRequestWrapper,
         ) -> Dict[str, Any]:
             chat_response: ChatCompletion = ChatCompletion(
                 id="chat_1",
@@ -83,7 +99,7 @@ async def test_call_agent_with_input(async_client: httpx.AsyncClient) -> None:
 
     response: StreamingResponse | JSONResponse = await provider.chat_completions(
         headers={},
-        chat_request=chat_request,
+        chat_request_wrapper=chat_request_wrapper,
         model_config=ChatModelConfig(
             id="1",
             name=model,

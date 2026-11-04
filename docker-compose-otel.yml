@@ -1,0 +1,136 @@
+services:
+  # Jaeger all-in-one provides collector (including OTLP), query, and UI in one container
+  jaeger:
+    # https://github.com/jaegertracing/jaeger/releases/
+    image: jaegertracing/jaeger:2.14.1
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    environment:
+      # Enable OTLP HTTP and gRPC receivers
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_HTTP_ENABLED=true
+      - COLLECTOR_OTLP_GRPC_MAX_RECEIVE_MESSAGE_LENGTH=33554432
+      - COLLECTOR_OTLP_HTTP_MAX_REQUEST_BODY_SIZE=33554432
+      # Optional: reduce memory usage
+      - MEMORY_MAX_TRACES=50000
+    ports:
+      - "16686:16686" # Jaeger UI
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://localhost:16686/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # OpenTelemetry Collector to aggregate and forward telemetry to Aspire
+  otel-collector:
+    image: otel/opentelemetry-collector:0.102.0
+    command: [ "--config=/etc/otelcol/config.yaml" ]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    ports:
+      # Expose collector ports for applications to send telemetry
+      - "4317:4317"   # OTLP gRPC receiver (for your apps)
+      - "4318:4318"   # OTLP HTTP receiver (for your apps)
+      - "13133:13133" # Health check endpoint
+      - "8888:8888"   # Metrics endpoint
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    networks:
+      - web
+
+  language-model-gateway:
+    extends:
+      service: language-model-gateway
+      file: docker-compose.yml
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    environment:
+      OTEL_SERVICE_NAME: "language-model-gateway"
+      # https://opentelemetry.io/docs/zero-code/python/
+      # https://opentelemetry.io/docs/zero-code/python/configuration/
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local"
+      # Export traces and metrics via OTLP gRPC to the local collector
+      OTEL_TRACES_EXPORTER: "otlp"
+      # OTEL_METRICS_EXPORTER: "console,otlp"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "grpc"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_TRACES_SAMPLER: "always_on"
+      OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "/health,/metrics"
+      # Enable metrics export via OTLP gRPC
+      OTEL_METRICS_EXPORTER: "otlp"
+      OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: "grpc"
+      # Optional: enable logs in future
+      # OTEL_LOGS_EXPORTER: "otlp"
+      # Span filtering configuration
+      OTEL_SPAN_FILTER_ENABLED: "true"
+      OTEL_SPAN_FILTER_PATTERNS: "admin.saslStart,saslContinue,admin.saslContinue,llm_storage.listIndexes,llm_storage.listCollections"
+      OTEL_SPAN_FILTER_DEBUG: "false"
+      OTEL_ENABLE_FILTERING_SPANS: 1
+      # https://opentelemetry.io/docs/zero-code/python/example/
+      OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST: "Accept-Encoding,User-Agent,Referer"
+      OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE: "Last-Modified,Content-Type"
+      OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SANITIZE_FIELDS: ".*session.*,set-cookie"
+      # Batch span processor settings to avoid RESOURCE_EXHAUSTED
+      OTEL_BSP_MAX_QUEUE_SIZE: "4096"
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "512"
+      OTEL_BSP_EXPORT_TIMEOUT: "30000"  # 30 seconds
+      OTEL_BSP_SCHEDULE_DELAY: "2000"   # 2 seconds
+    depends_on:
+      otel-collector:
+        condition: service_started
+    networks:
+      - web
+
+  open-webui:
+    extends:
+      service: open-webui
+      file: docker-compose-openwebui.yml
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    environment:
+      ENABLE_OTEL: "true"
+      # OpenWebUI has a lot of traces so disable unless needed for troubleshooting
+      ENABLE_OTEL_TRACES: "false"
+      ENABLE_OTEL_METRICS: "false"
+      OTEL_SERVICE_NAME: "open-webui"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_TRACES_SAMPLER: "always_on"
+      # Exclude health endpoint if applicable
+      OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "/health"
+      # Enable tracing for web frameworks (OpenWebUI is FastAPI-based)
+      OTEL_PYTHON_TRACER_PROVIDER: "sdk"
+      # Enable metrics export via OTLP gRPC
+      OTEL_METRICS_EXPORTER: "otlp"
+      OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: "grpc"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: language-model-gateway_web

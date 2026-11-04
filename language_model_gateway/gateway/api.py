@@ -1,25 +1,43 @@
+import asyncio
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
-from os import makedirs, environ
+from os import makedirs
 from pathlib import Path
 from typing import AsyncGenerator, Annotated, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.params import Depends
 from fastapi.responses import JSONResponse
+from oidcauthlib.auth.middleware.request_scope_middleware import RequestScopeMiddleware
+from oidcauthlib.auth.routers.auth_router import AuthRouter
+from oidcauthlib.auth.token_reader import TokenReader
+from oidcauthlib.auth.well_known_configuration.well_known_configuration_manager import (
+    WellKnownConfigurationManager,
+)
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
-from language_model_gateway.configs.config_reader.config_reader import ConfigReader
-from language_model_gateway.configs.config_schema import ChatModelConfig
-from language_model_gateway.gateway.api_container import get_config_reader
+from languagemodelcommon.configs.config_reader.config_reader import ConfigReader
+from key_value.aio.stores.base import BaseContextManagerStore, BaseStore
+from languagemodelcommon.configs.schemas.config_schema import ChatModelConfig
+from languagemodelcommon.utilities.mongo_url_utils import MongoUrlHelpers
+from language_model_gateway.container.container_factory import (
+    LanguageModelGatewayContainerFactory,
+)
 from language_model_gateway.gateway.middleware.fastapi_logging_middleware import (
     FastApiLoggingMiddleware,
 )
-from language_model_gateway.gateway.routers.auth_router import AuthRouter
+from language_model_gateway.gateway.routers.model_routing.router import (
+    CodingModelRouter,
+)
+from language_model_gateway.gateway.routers.model_routing.session_savings_router import (
+    SessionSavingsRouter,
+)
 from language_model_gateway.gateway.routers.chat_completion_router import (
     ChatCompletionsRouter,
 )
@@ -28,17 +46,46 @@ from language_model_gateway.gateway.routers.image_generation_router import (
 )
 from language_model_gateway.gateway.routers.images_router import ImagesRouter
 from language_model_gateway.gateway.routers.models_router import ModelsRouter
+from language_model_gateway.gateway.routers.app_login_router import (
+    AppLoginRouter,
+)
+from language_model_gateway.gateway.routers.skill_publish_router import (
+    SkillPublishRouter,
+)
+from language_model_gateway.gateway.routers.mcp_proxy_router import (
+    McpProxyRouter,
+)
+from language_model_gateway.gateway.routers.token_submission_router import (
+    TokenSubmissionRouter,
+)
 from language_model_gateway.gateway.utilities.endpoint_filter import EndpointFilter
-from language_model_gateway.gateway.utilities.logger.log_levels import SRC_LOG_LEVELS
+from language_model_gateway.gateway.utilities.logger.log_levels import (
+    SRC_LOG_LEVELS,
+    build_log_handler,
+)
+
+from simple_container.container.container_registry import ContainerRegistry
+from simple_container.container.inject import Inject
+
+from language_model_gateway.gateway.utilities.language_model_gateway_environment_variables import (
+    LanguageModelGatewayEnvironmentVariables,
+)
+from language_model_gateway.gateway.managers.model_resource_cache_manager import (
+    ModelResourceCacheManager,
+)
 
 # warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
 logger = logging.getLogger(__name__)
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+# force=True: log_levels.py may already have called basicConfig depending on
+# whether LOG_LEVEL was set when it was imported; this ensures the JSON/text
+# formatter choice here is always the one that takes effect.
 logging.basicConfig(
     level=getattr(logging, log_level),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    force=True,
+    handlers=[build_log_handler()],
 )
 
 # disable INFO logging for httpx because it logs every request
@@ -52,41 +99,186 @@ logging.getLogger("authlib").setLevel(SRC_LOG_LEVELS["AUTH"])
 uvicorn_logger = logging.getLogger("uvicorn.access")
 uvicorn_logger.addFilter(EndpointFilter(path="/health"))
 
+# register our container
+ContainerRegistry.set_default(
+    LanguageModelGatewayContainerFactory.create_container(
+        source=f"{__name__}[{uuid.uuid4().hex}]"
+    )
+)
+
+
+async def _load_all_configs(
+    *,
+    config_reader: ConfigReader,
+    cache_manager: ModelResourceCacheManager | None = None,
+) -> None:
+    """Eagerly load model configs (incl. MCP JSON resolution).
+
+    When cache_manager is provided, also pre-warms the per-model
+    resource cache (LLM instances, ToolCatalogs) so the first user
+    request avoids that setup cost.
+    """
+    configs: list[ChatModelConfig] = await config_reader.read_model_configs_async()
+    logger.info("Loaded %d model configs (includes MCP JSON resolution)", len(configs))
+
+    if cache_manager is not None:
+        await cache_manager.warm_cache(config_reader=config_reader)
+
+
+async def _config_refresh_loop(
+    *,
+    config_reader: ConfigReader,
+    cache_manager: ModelResourceCacheManager,
+    interval_minutes: int,
+) -> None:
+    """Periodically reload all configs in the background."""
+    interval_seconds = interval_minutes * 60
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            cache_manager.invalidate()
+            await config_reader.clear_cache()
+            await _load_all_configs(
+                config_reader=config_reader,
+                cache_manager=cache_manager,
+            )
+            logger.info("Background config refresh completed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Background config refresh failed", exc_info=True)
+
 
 @asynccontextmanager
 async def lifespan(app1: FastAPI) -> AsyncGenerator[None, None]:
-    # Startup: This runs when the first request comes in
-    worker_id = id(app)
+    worker_id = id(app1)
+    container = ContainerRegistry.get_current()
+    env_vars = container.resolve(LanguageModelGatewayEnvironmentVariables)
+    snapshot_cache: BaseContextManagerStore = container.resolve(BaseStore)
+    config_reader = container.resolve(ConfigReader)
+    cache_manager = container.resolve(ModelResourceCacheManager)
+    well_known_manager = container.resolve(WellKnownConfigurationManager)
+    refresh_task: asyncio.Task[None] | None = None
     try:
-        # Configure logging
         logger.info(f"Starting application initialization for worker {worker_id}...")
 
-        # perform any startup tasks here
+        # Open the snapshot cache store (MongoDB if configured, memory otherwise)
+        await snapshot_cache.__aenter__()
+
+        # Pre-warm OIDC discovery documents and JWKS so the first request
+        # doesn't pay the network latency cost.  Non-fatal: if the cache
+        # backend (e.g. MongoDB) is unavailable, configs load on-demand.
+        try:
+            await well_known_manager.ensure_initialized_async()
+        except Exception:
+            logger.warning(
+                "OIDC well-known pre-warm failed; will load on-demand",
+                exc_info=True,
+            )
+
+        # Eagerly load all configs (triggers GitHub download if configured)
+        # and pre-warm model resource caches at startup
+        await _load_all_configs(
+            config_reader=config_reader,
+            cache_manager=cache_manager,
+        )
+
+        # Start background refresh loop
+        interval = env_vars.config_refresh_interval_minutes
+        refresh_task = asyncio.create_task(
+            _config_refresh_loop(
+                config_reader=config_reader,
+                cache_manager=cache_manager,
+                interval_minutes=interval,
+            )
+        )
+        logger.info("Background config refresh scheduled every %d minutes", interval)
 
         logger.info(f"Application initialization completed for worker {worker_id}")
         yield
 
-    except Exception as e:
-        logger.exception(e, stack_info=True)
+    except Exception:
+        logger.exception("Application initialization failed for worker %s", worker_id)
         raise
 
     finally:
         try:
             logger.info(f"Starting application shutdown for worker {worker_id}...")
-            # await container.cleanup()
-            # Clean up on shutdown
+            if refresh_task is not None and not refresh_task.done():
+                refresh_task.cancel()
+                try:
+                    await refresh_task
+                except asyncio.CancelledError:
+                    # Expected: background refresh task was cancelled during shutdown
+                    logger.debug("Background refresh task cancelled during shutdown")
+            await snapshot_cache.__aexit__(None, None, None)
             logger.info("Application shutdown completed")
-        except Exception as e:
-            logger.exception(e, stack_info=True)
-            raise
+        except Exception:
+            logger.exception("Application shutdown failed for worker %s", worker_id)
 
 
 def create_app() -> FastAPI:
     app1: FastAPI = FastAPI(title="OpenAI-compatible API", lifespan=lifespan)
+
+    container = ContainerRegistry.get_current()
+    env_vars = container.resolve(LanguageModelGatewayEnvironmentVariables)
+
+    mongo_llm_storage_uri = env_vars.mongo_llm_storage_uri
+    if mongo_llm_storage_uri:
+        # The bare MONGO_URL/MONGO_LLM_STORAGE_URI has no embedded credentials in
+        # some environments; merge in MONGO_LLM_STORAGE_DB_USERNAME/PASSWORD the
+        # same way persistence_factory.py does for other Mongo-backed stores.
+        mongo_llm_storage_uri = MongoUrlHelpers.add_credentials_to_mongo_url(
+            mongo_url=mongo_llm_storage_uri,
+            username=env_vars.mongo_llm_storage_db_username,
+            password=env_vars.mongo_llm_storage_db_password,
+        )
+
+    app1.include_router(
+        CodingModelRouter(
+            mongo_uri=mongo_llm_storage_uri,
+            usage_db_name=env_vars.mongo_llm_storage_db_name or "llm_storage",
+            usage_collection_name=env_vars.model_routing_usage_collection_name,
+            usage_session_collection_name=(
+                env_vars.model_routing_usage_session_collection_name
+            ),
+            usage_track_sessions=env_vars.model_routing_usage_session_tracking_enabled,
+            usage_capture_previews=env_vars.model_routing_usage_capture_previews,
+            usage_preview_chars=env_vars.model_routing_usage_preview_chars,
+            error_collection_name=env_vars.model_routing_error_collection_name,
+            account_directory_collection_name=(
+                env_vars.model_routing_account_directory_collection_name
+            ),
+            token_reader=container.resolve(TokenReader),
+            debug_log_received_oauth_tokens=env_vars.debug_log_received_oauth_tokens,
+            custom_header_prefix=env_vars.model_routing_custom_header_prefix,
+            bedrock_transport=env_vars.model_routing_bedrock_transport,
+            qwen_enable_thinking=env_vars.model_routing_qwen_enable_thinking,
+            bedrock_connect_timeout_seconds=(
+                env_vars.model_routing_bedrock_connect_timeout_seconds
+            ),
+            bedrock_read_timeout_seconds=(
+                env_vars.model_routing_bedrock_read_timeout_seconds
+            ),
+            bedrock_max_attempts=env_vars.model_routing_bedrock_max_attempts,
+            bedrock_retry_mode=env_vars.model_routing_bedrock_retry_mode,
+        ).get_router()
+    )
+    app1.include_router(
+        SessionSavingsRouter(
+            mongo_uri=mongo_llm_storage_uri,
+            db_name=env_vars.mongo_llm_storage_db_name or "llm_storage",
+            collection_name=env_vars.model_routing_usage_session_collection_name,
+        ).get_router()
+    )
     app1.include_router(ChatCompletionsRouter().get_router())
     app1.include_router(ModelsRouter().get_router())
     app1.include_router(ImageGenerationRouter().get_router())
-    app1.include_router(AuthRouter().get_router())
+    app1.include_router(AuthRouter(prefix="/auth").get_router())
+    app1.include_router(AppLoginRouter(prefix="/app").get_router())
+    app1.include_router(TokenSubmissionRouter(prefix="/app").get_router())
+    app1.include_router(SkillPublishRouter(prefix="/skills").get_router())
+    app1.include_router(McpProxyRouter(prefix="/api/v1/mcp-proxy").get_router())
     # Mount the static directory
     app1.mount(
         "/static",
@@ -96,9 +288,8 @@ def create_app() -> FastAPI:
         name="static",
     )
 
-    image_generation_path: str = environ["IMAGE_GENERATION_PATH"]
-
-    if image_generation_path is None:
+    image_generation_path: str | None = env_vars.image_generation_path
+    if not image_generation_path:
         raise ValueError("IMAGE_GENERATION_PATH environment variable must be set")
 
     makedirs(image_generation_path, exist_ok=True)
@@ -108,9 +299,7 @@ def create_app() -> FastAPI:
 
     # Set up CORS middleware; adjust parameters as needed
     # noinspection PyTypeChecker
-    allowed_origins = environ.get("ALLOWED_ORIGINS", "").split(",")
-    if not allowed_origins or allowed_origins == [""]:
-        allowed_origins = ["*"]  # Allow all origins if not specified
+    allowed_origins = env_vars.allowed_origins
     app1.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -119,6 +308,16 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app1.add_middleware(FastApiLoggingMiddleware)
+
+    app1.add_middleware(RequestScopeMiddleware)
+
+    # Outermost middleware (added last) so it compresses the final response
+    # after FastApiLoggingMiddleware has already inspected the plain body.
+    # Starlette's GZipMiddleware hardcodes text/event-stream into its
+    # excluded-content-types list (not configurable via this constructor in
+    # the installed version), so SSE responses from the model routers are
+    # never compressed regardless of the client's Accept-Encoding.
+    app1.add_middleware(GZipMiddleware)
 
     return app1
 
@@ -132,9 +331,15 @@ async def health() -> str:
     return "OK"
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root() -> str:
+    """Root endpoint for ingress health checks."""
+    return "Language Model Gateway"
+
+
 @app.get("/favicon.png", include_in_schema=False)
+@app.get("/favicon.ico", include_in_schema=False)
 async def favicon() -> FileResponse:
-    # Get absolute path
     file_path = Path("language_model_gateway/static/bwell-web.png")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
@@ -143,7 +348,8 @@ async def favicon() -> FileResponse:
 
 @app.get("/refresh")
 async def refresh_data(
-    request: Request, config_reader: Annotated[ConfigReader, Depends(get_config_reader)]
+    request: Request,
+    config_reader: Annotated[ConfigReader, Depends(Inject(ConfigReader))],
 ) -> JSONResponse:
     if config_reader is None:
         raise ValueError("config_reader must not be None")
